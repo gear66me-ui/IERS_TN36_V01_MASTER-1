@@ -10,8 +10,6 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 VERSION = "V0121"
