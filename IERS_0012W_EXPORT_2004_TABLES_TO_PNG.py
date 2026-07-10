@@ -296,8 +296,11 @@ def export_table_pngs(
 
         display(Image(filename=GEOMETRY_TABLE_PNG_PATH))
         display(Image(filename=CONTACT_TABLE_PNG_PATH))
-    except Exception:
-        pass
+    except Exception as exc:
+        print(
+            "DEBUG / NOT USED: inline PNG display unavailable; "
+            f"files were still saved successfully ({type(exc).__name__})."
+        )
 
 
 '''
@@ -380,6 +383,8 @@ def export_table_pngs(
         raise RuntimeError("IERS-0012W audit rejected a TODO statement.")
     if "placeholder" in source.lower():
         raise RuntimeError("IERS-0012W audit rejected placeholder content.")
+    if "\n    pass\n" in source:
+        raise RuntimeError("IERS-0012W audit rejected an incomplete pass statement.")
     if not source.startswith("# IERS-0012W\n"):
         raise RuntimeError("IERS-0012W first-line version audit failed.")
     if not source.rstrip().endswith("# IERS-0012W"):
