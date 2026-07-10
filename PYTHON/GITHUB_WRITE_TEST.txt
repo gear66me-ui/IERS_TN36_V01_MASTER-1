@@ -1,0 +1,3 @@
+GitHub write test successful.
+Repository: gear66me-ui/IERS_TN36_V01_MASTER-1
+Path: PYTHON/GITHUB_WRITE_TEST.txt
