@@ -1,0 +1,111 @@
+name: Assemble IERS 0012V v3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/assemble_iers_0012v_v3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate clean unsigned angle panel
+        shell: bash
+        run: |
+          python - <<'PYCODE'
+          from pathlib import Path
+          import py_compile
+
+          source = Path("IERS_0012U_JPL_2004_NASA_FIGURE2_RECONSTRUCTION_LABEL_LAYOUT.py")
+          target = Path("IERS_0012V_JPL_2004_NASA_FIGURE2_ANGLE_REFERENCE.py")
+          text = source.read_text(encoding="utf-8")
+
+          text = text.replace("IERS-0012U", "IERS-0012V")
+          text = text.replace(
+              "IERS_0012U_JPL_2004_NASA_FIGURE2_RECONSTRUCTION_LABEL_LAYOUT.py",
+              "IERS_0012V_JPL_2004_NASA_FIGURE2_ANGLE_REFERENCE.py",
+          )
+          text = text.replace(
+              "preserve IERS-0012V JPL geometry and separate hourly/contact labels from the transit track.",
+              "preserve verified JPL geometry, show unsigned plot angles, and add a central two-reference angle panel.",
+          )
+          text = text.replace(
+              'f"TRACK/HORIZONTAL = {track_angle:+.4f}°\\n"',
+              'f"TRACK/HORIZONTAL = {abs(track_angle):.4f}°\\n"',
+          )
+          text = text.replace(
+              'f"ECLIPTIC/HORIZONTAL = {ecliptic_angle:+.4f}°\\n"',
+              'f"ECLIPTIC/HORIZONTAL = {abs(ecliptic_angle):.4f}°\\n"',
+          )
+
+          anchor = "    axis.set_xlim(-limit, limit)"
+          panel = '''    angle_reference_text = (
+        "ANGLE REFERENCES\\n"
+        f"TRACK TO HORIZONTAL  {abs(track_angle):.4f}°\\n"
+        f"VENUS TRACK FROM ECLIPTIC  {relative_angle:.4f}°"
+    )
+    axis.text(
+        0.0,
+        315.0,
+        angle_reference_text,
+        fontsize=8.0,
+        color="#e8f7ff",
+        ha="center",
+        va="center",
+        linespacing=1.50,
+        fontweight="bold",
+        zorder=15,
+        bbox={
+            "boxstyle": "round,pad=0.40",
+            "facecolor": "#03080d",
+            "edgecolor": "#24414f",
+            "linewidth": 0.40,
+            "alpha": 0.96,
+        },
+    )
+
+'''
+          if anchor not in text:
+              raise RuntimeError("Plot insertion anchor not found.")
+          text = text.replace(anchor, panel + anchor, 1)
+
+          comment_anchor = '    print("No AI image generation is used.")'
+          text = text.replace(
+              comment_anchor,
+              '    print("Plot angle labels use unsigned magnitudes for immediate visual interpretation.")\n'
+              '    print("A central panel reports track-to-horizontal and Venus-track-to-ecliptic angles.")\n'
+              '    print("No AI image generation is used.")',
+              1,
+          )
+
+          target.write_text(text, encoding="utf-8")
+          py_compile.compile(str(target), doraise=True)
+
+          lines = text.splitlines()
+          if lines[0] != "# IERS-0012V" or lines[-1] != "# IERS-0012V":
+              raise RuntimeError("Version boundary audit failed.")
+          for required in (
+              "TRACK TO HORIZONTAL",
+              "VENUS TRACK FROM ECLIPTIC",
+              "abs(track_angle):.4f",
+              "abs(ecliptic_angle):.4f",
+          ):
+              if required not in text:
+                  raise RuntimeError(f"Missing required revision: {required}")
+          print(f"Created {target}; lines={len(lines)}; compile=PASS; audit=PASS")
+          PYCODE
+
+      - name: Commit generated source
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add IERS_0012V_JPL_2004_NASA_FIGURE2_ANGLE_REFERENCE.py
+          git commit -m "Add IERS 0012V unsigned central angle panel"
+          git push
