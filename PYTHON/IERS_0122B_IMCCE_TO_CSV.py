@@ -1,5 +1,5 @@
 # V0122B
-# Audit reference: strict field parser for the IMCCE Venus Transit Canon records.
+# Audit reference: strict field parser for the IMCCE Venus Transit Canon records; contact clocks support HH:MM:SS.
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ LOCAL_TZ = timezone(timedelta(hours=-5))
 USER_AGENT = "Mozilla/5.0 (compatible; IERS-TN36-IMCCE-Parser/1.0)"
 REQUIRED_YEARS = {1761, 1769, 1874, 1882, 2004, 2012}
 NUM = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
-CLOCK = rf"(?:\d{{1,2}}\s*:\s*{NUM}|[-.]+(?:\s*:\s*[-.]+)?)"
+CLOCK = rf"(?:\d{{1,2}}\s*:\s*\d{{1,2}}\s*:\s*{NUM}|\d{{1,2}}\s*:\s*{NUM}|[-.]+(?:\s*:\s*[-.]+){{0,2}})"
 
 RECORD_RE = re.compile(
     rf"^\s*(?P<jd_tdb>\d{{7}}\.\d{{3}})\s+"
