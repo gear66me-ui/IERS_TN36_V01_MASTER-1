@@ -1,0 +1,199 @@
+name: Assemble IERS 0012V v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/assemble_iers_0012v_v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate unsigned central angle references
+        shell: bash
+        run: |
+          python - <<'PYCODE'
+          from pathlib import Path
+          import py_compile
+
+          source = Path("IERS_0012U_JPL_2004_NASA_FIGURE2_RECONSTRUCTION_LABEL_LAYOUT.py")
+          target = Path("IERS_0012V_JPL_2004_NASA_FIGURE2_ANGLE_REFERENCE.py")
+          text = source.read_text(encoding="utf-8")
+
+          text = text.replace(
+              "# Audit reference: GitHubDelivery@IERS-0012U; preserve IERS-0012U JPL geometry and separate hourly/contact labels from the transit track.",
+              "# Audit reference: GitHubDelivery@IERS-0012V; preserve JPL geometry, show unsigned plot angles, and add a central two-reference angle guide.",
+          )
+          text = text.replace(
+              "IERS_0012U_JPL_2004_NASA_FIGURE2_RECONSTRUCTION_LABEL_LAYOUT.py",
+              "IERS_0012V_JPL_2004_NASA_FIGURE2_ANGLE_REFERENCE.py",
+          )
+          text = text.replace("IERS-0012U", "IERS-0012V")
+
+          text = text.replace(
+              'f"TRACK/HORIZONTAL = {track_angle:+.4f}°\\n"',
+              'f"TRACK/HORIZONTAL = {abs(track_angle):.4f}°\\n"',
+          )
+          text = text.replace(
+              'f"ECLIPTIC/HORIZONTAL = {ecliptic_angle:+.4f}°\\n"',
+              'f"ECLIPTIC/HORIZONTAL = {abs(ecliptic_angle):.4f}°\\n"',
+          )
+
+          anchor = "    axis.set_xlim(-limit, limit)"
+          if text.count(anchor) != 1:
+              raise RuntimeError(f"Expected one plot insertion anchor; found {text.count(anchor)}")
+
+          block = '''    angle_reference_origin = np.array([-55.0, 315.0], dtype=float)
+    angle_reference_length = 255.0
+    horizontal_reference = np.array([1.0, 0.0], dtype=float)
+    ecliptic_reference = np.array(
+        [
+            math.cos(math.radians(-abs(ecliptic_angle))),
+            math.sin(math.radians(-abs(ecliptic_angle))),
+        ],
+        dtype=float,
+    )
+    track_reference = np.array(
+        [
+            math.cos(math.radians(-abs(track_angle))),
+            math.sin(math.radians(-abs(track_angle))),
+        ],
+        dtype=float,
+    )
+
+    for direction, line_style, line_width, line_color in (
+        (horizontal_reference, "-", 0.28, "#e8f7ff"),
+        (ecliptic_reference, (0, (5, 4)), 0.34, "#66e8ff"),
+        (track_reference, "-", 0.48, "#ff9f1c"),
+    ):
+        endpoint = angle_reference_origin + angle_reference_length * direction
+        axis.plot(
+            [angle_reference_origin[0], endpoint[0]],
+            [angle_reference_origin[1], endpoint[1]],
+            linestyle=line_style,
+            linewidth=line_width,
+            color=line_color,
+            zorder=13,
+        )
+
+    axis.scatter(
+        [angle_reference_origin[0]],
+        [angle_reference_origin[1]],
+        s=3.0,
+        linewidths=0,
+        color="#e8f7ff",
+        zorder=14,
+    )
+
+    angle_reference_text = (
+        "ANGLE REFERENCES\\n"
+        f"TRACK TO HORIZONTAL  {abs(track_angle):.4f}°\\n"
+        f"VENUS TRACK FROM ECLIPTIC  {relative_angle:.4f}°"
+    )
+    axis.text(
+        angle_reference_origin[0] + 0.48 * angle_reference_length,
+        angle_reference_origin[1] + 105.0,
+        angle_reference_text,
+        fontsize=7.4,
+        color="#e8f7ff",
+        ha="center",
+        va="bottom",
+        linespacing=1.45,
+        fontweight="bold",
+        zorder=15,
+        bbox={
+            "boxstyle": "round,pad=0.34",
+            "facecolor": "#03080d",
+            "edgecolor": "#24414f",
+            "linewidth": 0.34,
+            "alpha": 0.95,
+        },
+    )
+
+    horizontal_endpoint = angle_reference_origin + angle_reference_length * horizontal_reference
+    ecliptic_endpoint = angle_reference_origin + angle_reference_length * ecliptic_reference
+    track_endpoint = angle_reference_origin + angle_reference_length * track_reference
+    axis.text(
+        horizontal_endpoint[0] + 12.0,
+        horizontal_endpoint[1] + 5.0,
+        "HORIZONTAL",
+        fontsize=5.3,
+        color="#e8f7ff",
+        ha="left",
+        va="bottom",
+        zorder=15,
+    )
+    axis.text(
+        ecliptic_endpoint[0] + 7.0,
+        ecliptic_endpoint[1] - 8.0,
+        "ECLIPTIC",
+        fontsize=5.3,
+        color="#66e8ff",
+        ha="left",
+        va="top",
+        rotation=-abs(ecliptic_angle),
+        rotation_mode="anchor",
+        zorder=15,
+    )
+    axis.text(
+        track_endpoint[0] + 7.0,
+        track_endpoint[1] - 9.0,
+        "VENUS TRACK",
+        fontsize=5.3,
+        color="#ff9f1c",
+        ha="left",
+        va="top",
+        rotation=-abs(track_angle),
+        rotation_mode="anchor",
+        zorder=15,
+    )
+
+'''
+          text = text.replace(anchor, block + anchor)
+
+          comment_anchor = '    print("No AI image generation is used.")'
+          if text.count(comment_anchor) != 1:
+              raise RuntimeError("No-AI comment anchor missing.")
+          text = text.replace(
+              comment_anchor,
+              '    print("Plot angle labels use unsigned magnitudes for immediate visual interpretation.")\n'
+              '    print("A central guide shows track-to-horizontal and Venus-track-to-ecliptic references.")\n'
+              '    print("No AI image generation is used.")',
+          )
+
+          target.write_text(text, encoding="utf-8")
+          py_compile.compile(str(target), doraise=True)
+
+          lines = text.splitlines()
+          required = [
+              "TRACK TO HORIZONTAL",
+              "VENUS TRACK FROM ECLIPTIC",
+              "abs(track_angle):.4f",
+              "abs(ecliptic_angle):.4f",
+              "angle_reference_origin",
+          ]
+          missing = [item for item in required if item not in text]
+          if missing:
+              raise RuntimeError(f"Required plot revisions missing: {missing}")
+          if lines[0] != "# IERS-0012V" or lines[-1] != "# IERS-0012V":
+              raise RuntimeError("Version boundary audit failed.")
+          if "TODO" in text or "placeholder" in text.lower() or "\n    pass\n" in text:
+              raise RuntimeError("Incomplete implementation audit failed.")
+
+          print(f"Created {target}; lines={len(lines)}; compile=PASS; audit=PASS")
+          PYCODE
+
+      - name: Commit generated source
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add IERS_0012V_JPL_2004_NASA_FIGURE2_ANGLE_REFERENCE.py
+          git commit -m "Add IERS 0012V unsigned central angle references"
+          git push
