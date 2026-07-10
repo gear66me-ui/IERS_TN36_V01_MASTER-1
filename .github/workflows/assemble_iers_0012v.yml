@@ -1,0 +1,303 @@
+name: Assemble IERS 0012V
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/assemble_iers_0012v.yml
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate angle-reference plot revision
+        shell: bash
+        run: |
+          python - <<'PYCODE'
+          from pathlib import Path
+          import py_compile
+
+          source = Path("IERS_0012U_JPL_2004_NASA_FIGURE2_RECONSTRUCTION_LABEL_LAYOUT.py")
+          target = Path("IERS_0012V_JPL_2004_NASA_FIGURE2_ANGLE_REFERENCE.py")
+          text = source.read_text(encoding="utf-8")
+
+          replacements = [
+              (
+                  "# Audit reference: GitHubDelivery@IERS-0012U; preserve IERS-0012U JPL geometry and separate hourly/contact labels from the transit track.",
+                  "# Audit reference: GitHubDelivery@IERS-0012V; preserve JPL geometry, show unsigned plot angles, and add a central two-reference angle diagram.",
+              ),
+              (
+                  "IERS_0012U_JPL_2004_NASA_FIGURE2_RECONSTRUCTION_LABEL_LAYOUT.py",
+                  "IERS_0012V_JPL_2004_NASA_FIGURE2_ANGLE_REFERENCE.py",
+              ),
+              (
+                  "from matplotlib.patches import Circle",
+                  "from matplotlib.patches import Arc, Circle",
+              ),
+          ]
+          for old, new in replacements:
+              if text.count(old) != 1:
+                  raise RuntimeError(f"Expected one occurrence: {old!r}; got {text.count(old)}")
+              text = text.replace(old, new)
+
+          text = text.replace("IERS-0012U", "IERS-0012V")
+
+          old_information = '''    information = (
+        "JPL HORIZONS — GEOCENTER\\n"
+        f"TRACK/HORIZONTAL = {track_angle:+.4f}°\\n"
+        f"ECLIPTIC/HORIZONTAL = {ecliptic_angle:+.4f}°\\n"
+        f"TRACK/ECLIPTIC = {relative_angle:.4f}°\\n"
+        f"SUN SD = {sun_radius:.3f}″\\n"
+        f"VENUS SD = {venus_radius:.3f}″"
+    )
+'''
+          new_information = '''    information = (
+        "JPL HORIZONS — GEOCENTER\\n"
+        f"TRACK/HORIZONTAL = {abs(track_angle):.4f}°\\n"
+        f"ECLIPTIC/HORIZONTAL = {abs(ecliptic_angle):.4f}°\\n"
+        f"TRACK/ECLIPTIC = {relative_angle:.4f}°\\n"
+        f"SUN SD = {sun_radius:.3f}″\\n"
+        f"VENUS SD = {venus_radius:.3f}″"
+    )
+'''
+          if text.count(old_information) != 1:
+              raise RuntimeError("Plot information block not found exactly once.")
+          text = text.replace(old_information, new_information)
+
+          insertion_anchor = '''    axis.text(
+        -limit * 0.96,
+        limit * 0.90,
+        information,
+        fontsize=5.8,
+        color="#8fb4c1",
+        ha="left",
+        va="top",
+        linespacing=1.35,
+    )
+
+'''
+          angle_diagram = '''    axis.text(
+        -limit * 0.96,
+        limit * 0.90,
+        information,
+        fontsize=5.8,
+        color="#8fb4c1",
+        ha="left",
+        va="top",
+        linespacing=1.35,
+    )
+
+    angle_origin = np.array([90.0, 315.0], dtype=float)
+    reference_length = 245.0
+    horizontal_direction = np.array([1.0, 0.0], dtype=float)
+    track_reference_direction = np.array(
+        [
+            math.cos(math.radians(-abs(track_angle))),
+            math.sin(math.radians(-abs(track_angle))),
+        ],
+        dtype=float,
+    )
+    ecliptic_reference_direction = np.array(
+        [
+            math.cos(math.radians(-abs(ecliptic_angle))),
+            math.sin(math.radians(-abs(ecliptic_angle))),
+        ],
+        dtype=float,
+    )
+
+    axis.plot(
+        [angle_origin[0], angle_origin[0] + reference_length],
+        [angle_origin[1], angle_origin[1]],
+        linewidth=0.28,
+        color="#e8f7ff",
+        zorder=12,
+    )
+    axis.plot(
+        [angle_origin[0], angle_origin[0] + reference_length * ecliptic_reference_direction[0]],
+        [angle_origin[1], angle_origin[1] + reference_length * ecliptic_reference_direction[1]],
+        linewidth=0.34,
+        linestyle=(0, (5, 4)),
+        color="#66e8ff",
+        zorder=12,
+    )
+    axis.plot(
+        [angle_origin[0], angle_origin[0] + reference_length * track_reference_direction[0]],
+        [angle_origin[1], angle_origin[1] + reference_length * track_reference_direction[1]],
+        linewidth=0.46,
+        color="#ff9f1c",
+        zorder=13,
+    )
+
+    horizontal_arc_radius = 96.0
+    track_arc_radius = 142.0
+    axis.add_patch(
+        Arc(
+            angle_origin,
+            2.0 * horizontal_arc_radius,
+            2.0 * horizontal_arc_radius,
+            theta1=360.0 - abs(track_angle),
+            theta2=360.0,
+            linewidth=0.30,
+            color="#e8f7ff",
+            zorder=14,
+        )
+    )
+    axis.add_patch(
+        Arc(
+            angle_origin,
+            2.0 * track_arc_radius,
+            2.0 * track_arc_radius,
+            theta1=360.0 - abs(track_angle),
+            theta2=360.0 - abs(ecliptic_angle),
+            linewidth=0.36,
+            color="#ff9f1c",
+            zorder=14,
+        )
+    )
+
+    horizontal_mid_angle = -0.5 * abs(track_angle)
+    relative_mid_angle = -0.5 * (
+        abs(track_angle) + abs(ecliptic_angle)
+    )
+    axis.text(
+        angle_origin[0]
+        + 1.20 * horizontal_arc_radius * math.cos(math.radians(horizontal_mid_angle)),
+        angle_origin[1]
+        + 1.20 * horizontal_arc_radius * math.sin(math.radians(horizontal_mid_angle)),
+        f"{abs(track_angle):.4f}°",
+        fontsize=6.2,
+        color="#e8f7ff",
+        ha="center",
+        va="center",
+        zorder=15,
+        bbox={
+            "boxstyle": "round,pad=0.14",
+            "facecolor": "#03080d",
+            "edgecolor": "none",
+            "alpha": 0.92,
+        },
+    )
+    axis.text(
+        angle_origin[0]
+        + 1.13 * track_arc_radius * math.cos(math.radians(relative_mid_angle)),
+        angle_origin[1]
+        + 1.13 * track_arc_radius * math.sin(math.radians(relative_mid_angle)),
+        f"{relative_angle:.4f}°",
+        fontsize=6.2,
+        color="#ff9f1c",
+        ha="center",
+        va="center",
+        zorder=15,
+        bbox={
+            "boxstyle": "round,pad=0.14",
+            "facecolor": "#03080d",
+            "edgecolor": "none",
+            "alpha": 0.92,
+        },
+    )
+
+    angle_summary = (
+        f"TRACK TO HORIZONTAL  {abs(track_angle):.4f}°\\n"
+        f"VENUS TRACK FROM ECLIPTIC  {relative_angle:.4f}°"
+    )
+    axis.text(
+        angle_origin[0] + 0.48 * reference_length,
+        angle_origin[1] + 92.0,
+        angle_summary,
+        fontsize=7.2,
+        color="#e8f7ff",
+        ha="center",
+        va="bottom",
+        linespacing=1.45,
+        fontweight="bold",
+        zorder=16,
+        bbox={
+            "boxstyle": "round,pad=0.32",
+            "facecolor": "#03080d",
+            "edgecolor": "#24414f",
+            "linewidth": 0.32,
+            "alpha": 0.94,
+        },
+    )
+    axis.text(
+        angle_origin[0] + reference_length + 12.0,
+        angle_origin[1] + 8.0,
+        "HORIZONTAL",
+        fontsize=5.2,
+        color="#e8f7ff",
+        ha="left",
+        va="bottom",
+        zorder=15,
+    )
+    axis.text(
+        angle_origin[0] + 0.79 * reference_length * ecliptic_reference_direction[0],
+        angle_origin[1] + 0.79 * reference_length * ecliptic_reference_direction[1] - 16.0,
+        "ECLIPTIC",
+        fontsize=5.2,
+        color="#66e8ff",
+        ha="center",
+        va="top",
+        rotation=-abs(ecliptic_angle),
+        rotation_mode="anchor",
+        zorder=15,
+    )
+    axis.text(
+        angle_origin[0] + 0.77 * reference_length * track_reference_direction[0],
+        angle_origin[1] + 0.77 * reference_length * track_reference_direction[1] - 18.0,
+        "VENUS TRACK",
+        fontsize=5.2,
+        color="#ff9f1c",
+        ha="center",
+        va="top",
+        rotation=-abs(track_angle),
+        rotation_mode="anchor",
+        zorder=15,
+    )
+
+'''
+          if text.count(insertion_anchor) != 1:
+              raise RuntimeError("Plot information insertion anchor not found exactly once.")
+          text = text.replace(insertion_anchor, angle_diagram)
+
+          old_comment = '    print("No AI image generation is used.")'
+          new_comment = '''    print("Plot angle labels use unsigned magnitudes for immediate visual interpretation.")
+    print("A central reference diagram shows track-to-horizontal and Venus-track-to-ecliptic angles.")
+    print("No AI image generation is used.")'''
+          if text.count(old_comment) != 1:
+              raise RuntimeError("No-AI comment anchor not found exactly once.")
+          text = text.replace(old_comment, new_comment)
+
+          target.write_text(text, encoding="utf-8")
+          py_compile.compile(str(target), doraise=True)
+
+          lines = text.splitlines()
+          checks = {
+              "first line": lines[0] == "# IERS-0012V",
+              "last line": lines[-1] == "# IERS-0012V",
+              "unsigned plot track": "abs(track_angle):.4f" in text,
+              "central summary": "TRACK TO HORIZONTAL" in text,
+              "second reference": "VENUS TRACK FROM ECLIPTIC" in text,
+              "angle arcs": "Arc(" in text,
+              "no TODO": "TODO" not in text,
+              "no placeholder": "placeholder" not in text.lower(),
+              "no pass statement": "\n    pass\n" not in text,
+          }
+          failed = [name for name, status in checks.items() if not status]
+          if failed:
+              raise RuntimeError(f"Audit failed: {failed}")
+          print(f"Created {target}; lines={len(lines)}; compile=PASS; audit=PASS")
+          PYCODE
+
+      - name: Commit generated source
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add IERS_0012V_JPL_2004_NASA_FIGURE2_ANGLE_REFERENCE.py
+          git commit -m "Add IERS 0012V central unsigned angle references"
+          git push
