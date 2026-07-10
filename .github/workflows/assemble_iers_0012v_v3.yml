@@ -109,3 +109,5 @@ jobs:
           git add IERS_0012V_JPL_2004_NASA_FIGURE2_ANGLE_REFERENCE.py
           git commit -m "Add IERS 0012V unsigned central angle panel"
           git push
+
+# retrigger-after-install
