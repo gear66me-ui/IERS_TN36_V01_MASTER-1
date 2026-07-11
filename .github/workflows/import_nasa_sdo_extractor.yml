@@ -1,0 +1,47 @@
+name: Import NASA SDO extractor
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/import_nasa_sdo_extractor.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-extractor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out IERS repository
+        uses: actions/checkout@v4
+
+      - name: Reconstruct verified V0004 extractor
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEST="PYTHON/NASA_SDO_2012_VIDEO_EXTRACTION/V0004"
+          mkdir -p "$DEST"
+          curl -fsSL --retry 3 \
+            "https://raw.githubusercontent.com/gear66me-ui/GitHub_Sandbox/main/NASA_SDO_2012_TRACK_EXTRACT_V0004_DOWNLOAD.sh" \
+            | bash -s -- "$DEST/NASA_SDO_2012_TRACK_EXTRACT.py"
+          python -m py_compile "$DEST/NASA_SDO_2012_TRACK_EXTRACT.py"
+          ACTUAL="$(sha256sum "$DEST/NASA_SDO_2012_TRACK_EXTRACT.py" | awk '{print $1}')"
+          EXPECTED="e11f9b0f01cb679cce4f1781064c011da1d8c45f4e3e1f8b964053a2d28d86f5"
+          test "$ACTUAL" = "$EXPECTED"
+          rm -rf "$DEST/__pycache__"
+
+      - name: Commit extractor to IERS repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add PYTHON/NASA_SDO_2012_VIDEO_EXTRACTION/V0004/NASA_SDO_2012_TRACK_EXTRACT.py
+          if git diff --cached --quiet; then
+            echo "Extractor already present."
+          else
+            git commit -m "Add NASA SDO 2012 extractor V0004"
+            git push
+          fi
