@@ -1,0 +1,160 @@
+
+def apparent_radii(data: dict[str, object], site: dict[str, object], jd: float) -> tuple[float, float]:
+    sun = site_vector(data, site, "SUN", jd)
+    mercury = site_vector(data, site, "MERCURY", jd)
+    return (
+        math.atan2(SUN_RADIUS_KM, norm(sun)) * ARCSEC_PER_RAD,
+        math.atan2(MERCURY_RADIUS_KM, norm(mercury)) * ARCSEC_PER_RAD,
+    )
+
+
+def contact_function(data: dict[str, object], site: dict[str, object], internal: bool, jd: float) -> float:
+    sun = site_vector(data, site, "SUN", jd)
+    mercury = site_vector(data, site, "MERCURY", jd)
+    separation = angular_separation_arcsec(sun, mercury)
+    solar_radius, mercury_radius = apparent_radii(data, site, jd)
+    threshold = solar_radius - mercury_radius if internal else solar_radius + mercury_radius
+    return separation - threshold
+
+
+def contact_roots(data: dict[str, object], site: dict[str, object], internal: bool) -> list[float]:
+    jd = np.asarray(data["jd"], dtype=float)
+    values = np.array([contact_function(data, site, internal, value) for value in jd], dtype=float)
+    found: list[float] = []
+    for index in range(len(jd) - 1):
+        left = values[index]
+        right = values[index + 1]
+        if left == 0.0:
+            found.append(float(jd[index]))
+        elif np.isfinite(left) and np.isfinite(right) and left * right < 0.0:
+            found.append(
+                float(
+                    brentq(
+                        lambda trial: contact_function(data, site, internal, trial),
+                        jd[index],
+                        jd[index + 1],
+                        xtol=1e-13,
+                        rtol=1e-13,
+                        maxiter=200,
+                    )
+                )
+            )
+    return sorted(found)
+
+
+def closest_approach(data: dict[str, object], site: dict[str, object]) -> float:
+    jd = np.asarray(data["jd"], dtype=float)
+    separations = np.array(
+        [
+            angular_separation_arcsec(
+                site_vector(data, site, "SUN", value),
+                site_vector(data, site, "MERCURY", value),
+            )
+            for value in jd
+        ],
+        dtype=float,
+    )
+    index = int(np.argmin(separations))
+    left = float(jd[max(0, index - 3)])
+    right = float(jd[min(len(jd) - 1, index + 3)])
+    solution = minimize_scalar(
+        lambda trial: angular_separation_arcsec(
+            site_vector(data, site, "SUN", trial),
+            site_vector(data, site, "MERCURY", trial),
+        ),
+        bounds=(left, right),
+        method="bounded",
+        options={"xatol": 1e-13},
+    )
+    if not solution.success:
+        raise RuntimeError(f"Closest-approach minimization failed for {site['label']}.")
+    return float(solution.x)
+
+
+def compute_events(data: dict[str, object], site: dict[str, object]) -> dict[str, float]:
+    outer = contact_roots(data, site, internal=False)
+    inner = contact_roots(data, site, internal=True)
+    if len(outer) < 2 or len(inner) < 2:
+        raise RuntimeError(f"Could not derive four contacts for {site['label']}.")
+    events = {
+        "C1": outer[0],
+        "C2": inner[0],
+        "CA": closest_approach(data, site),
+        "C3": inner[-1],
+        "C4": outer[-1],
+    }
+    ordered = [events[name] for name in EVENTS]
+    if ordered != sorted(ordered):
+        raise RuntimeError(f"Event chronology failed for {site['label']}.")
+    return events
+
+
+def screen_basis(geo: dict[str, object], jd: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    normal = unit(vector_at(geo, "GEO_SUN", jd))
+    reference = np.array([0.0, 0.0, 1.0])
+    if norm(np.cross(reference, normal)) < 1e-12:
+        reference = np.array([1.0, 0.0, 0.0])
+    xhat = unit(np.cross(reference, normal))
+    yhat = unit(np.cross(normal, xhat))
+    return normal, xhat, yhat
+
+
+def observer_geocentric(
+    geo: dict[str, object],
+    topo: dict[str, object],
+    site: dict[str, object],
+    jd: float,
+) -> np.ndarray:
+    return vector_at(geo, "GEO_SUN", jd) - site_vector(topo, site, "SUN", jd)
+
+
+def screen_point(
+    geo: dict[str, object],
+    topo: dict[str, object],
+    site: dict[str, object],
+    jd: float,
+    basis: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> np.ndarray:
+    normal, xhat, yhat = basis
+    sun_geo = vector_at(geo, "GEO_SUN", jd)
+    mercury_topo = site_vector(topo, site, "MERCURY", jd)
+    observer_geo = observer_geocentric(geo, topo, site, jd)
+    denominator = float(np.dot(mercury_topo, normal))
+    if abs(denominator) < 1e-12:
+        raise RuntimeError("Mercury ray is parallel to the solar screen.")
+    scale = float(np.dot(sun_geo - observer_geo, normal) / denominator)
+    hit = observer_geo + scale * mercury_topo
+    offset = hit - sun_geo
+    return np.array(
+        [
+            math.atan2(float(np.dot(offset, xhat)), IAU1976_AU_KM) * ARCSEC_PER_RAD,
+            math.atan2(float(np.dot(offset, yhat)), IAU1976_AU_KM) * ARCSEC_PER_RAD,
+        ],
+        dtype=float,
+    )
+
+
+def normalized_mercury_radius(
+    geo: dict[str, object],
+    topo: dict[str, object],
+    site: dict[str, object],
+    jd: float,
+) -> float:
+    actual_radius = apparent_radii(topo, site, jd)[1]
+    actual_es = norm(vector_at(geo, "GEO_SUN", jd))
+    return math.atan(math.tan(actual_radius / ARCSEC_PER_RAD) * actual_es / IAU1976_AU_KM) * ARCSEC_PER_RAD
+
+
+def build_track(
+    geo: dict[str, object],
+    topo: dict[str, object],
+    site: dict[str, object],
+    events: dict[str, float],
+    basis: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> dict[str, object]:
+    minute_jd = np.asarray(topo["jd"], dtype=float)
+    selected = minute_jd[(minute_jd >= events["C1"]) & (minute_jd <= events["C4"])]
+    all_jd = np.array(sorted(set(selected.tolist() + list(events.values()))), dtype=float)
+    points = np.array([screen_point(geo, topo, site, value, basis) for value in all_jd], dtype=float)
+    event_points = {name: screen_point(geo, topo, site, value, basis) for name, value in events.items()}
+    event_radii = {name: normalized_mercury_radius(geo, topo, site, value) for name, value in events.items()}
