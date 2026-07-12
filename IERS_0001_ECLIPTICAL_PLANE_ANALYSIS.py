@@ -1,413 +1,269 @@
 """
 IERS TN36 — Ecliptical Plane Analysis
-Parts A+B+C+D+E
+Part F — Direct JPL Horizons vector acquisition
 Bucaramanga observer, 2012 Venus transit
 """
 
-from pathlib import Path
+from __future__ import annotations
+
 import csv
+import json
 import re
+from dataclasses import dataclass
+from typing import Dict
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
 import numpy as np
-import matplotlib.pyplot as plt
-from scipy.interpolate import interp1d
 
-VERSION = "IERS-0001-E"
-ARCSEC_PER_RAD = 206_264.80624709636
-SECONDS_PER_DAY = 86_400.0
+VERSION = "IERS-0001-F"
+HORIZONS_API = "https://ssd.jpl.nasa.gov/api/horizons.api"
+HORIZONS_API_VERSION = "1.3"
 
-OBSERVER = {
-    "name": "Bucaramanga, Colombia",
-    "latitude_deg": 7.125390,
-    "longitude_deg": -73.119800,
-    "elevation_m": 959.0,
+START_TIME_UTC = "2012-06-05 21:00"
+STOP_TIME_UTC = "2012-06-06 07:00"
+STEP_SIZE = "1 min"
+
+
+@dataclass(frozen=True)
+class Observer:
+    name: str
+    longitude_deg: float
+    latitude_deg: float
+    elevation_km: float
+    center_body: int = 399
+
+    @property
+    def center(self) -> str:
+        return f"coord@{self.center_body}"
+
+    @property
+    def site_coord(self) -> str:
+        return (
+            f"{self.longitude_deg:.8f},"
+            f"{self.latitude_deg:.8f},"
+            f"{self.elevation_km:.6f}"
+        )
+
+
+BUCARAMANGA = Observer(
+    name="Bucaramanga, Colombia",
+    longitude_deg=-73.11980000,
+    latitude_deg=7.12539000,
+    elevation_km=0.959000,
+)
+
+TARGETS = {
+    "Sun": "10",
+    "Venus": "299",
 }
-TRANSIT = {"target": "Venus", "center": "Sun", "date_utc": "2012-06-06"}
-
-SUN_VECTOR_FILE = "JPL_2012_BUCARAMANGA_SUN_VECTORS.csv"
-VENUS_VECTOR_FILE = "JPL_2012_BUCARAMANGA_VENUS_VECTORS.csv"
 
 
-def normalize(vector):
-    vector = np.asarray(vector, dtype=float)
-    magnitude = np.linalg.norm(vector)
-    if not np.isfinite(magnitude) or magnitude == 0.0:
-        raise ValueError("Cannot normalize a zero or non-finite vector.")
-    return vector / magnitude
+def quoted(value: str) -> str:
+    return f"'{value}'"
 
 
-def normalize_rows(vectors):
-    vectors = np.asarray(vectors, dtype=float)
-    magnitudes = np.linalg.norm(vectors, axis=1)
-    if np.any(~np.isfinite(magnitudes)) or np.any(magnitudes == 0.0):
-        raise ValueError("Cannot normalize zero or non-finite vector rows.")
-    return vectors / magnitudes[:, None]
+def build_horizons_parameters(target_id: str, observer: Observer) -> Dict[str, str]:
+    return {
+        "format": "json",
+        "COMMAND": quoted(target_id),
+        "OBJ_DATA": quoted("NO"),
+        "MAKE_EPHEM": quoted("YES"),
+        "EPHEM_TYPE": quoted("VECTORS"),
+        "CENTER": quoted(observer.center),
+        "COORD_TYPE": quoted("GEODETIC"),
+        "SITE_COORD": quoted(observer.site_coord),
+        "START_TIME": quoted(START_TIME_UTC),
+        "STOP_TIME": quoted(STOP_TIME_UTC),
+        "STEP_SIZE": quoted(STEP_SIZE),
+        "TIME_TYPE": quoted("UT"),
+        "TIME_DIGITS": quoted("SECONDS"),
+        "REF_PLANE": quoted("FRAME"),
+        "REF_SYSTEM": quoted("ICRF"),
+        "OUT_UNITS": quoted("KM-S"),
+        "VEC_TABLE": quoted("2"),
+        "VEC_CORR": quoted("NONE"),
+        "CSV_FORMAT": quoted("YES"),
+        "VEC_LABELS": quoted("YES"),
+    }
 
 
-def build_screen_basis(line_of_sight):
-    w_axis = normalize(line_of_sight)
-    trial = np.array([0.0, 0.0, 1.0])
-    if abs(np.dot(w_axis, trial)) > 0.95:
-        trial = np.array([0.0, 1.0, 0.0])
-    u_axis = normalize(np.cross(trial, w_axis))
-    v_axis = normalize(np.cross(w_axis, u_axis))
-    return u_axis, v_axis, w_axis
+def build_horizons_url(target_id: str, observer: Observer) -> str:
+    return f"{HORIZONS_API}?{urlencode(build_horizons_parameters(target_id, observer))}"
 
 
-def interpolate_vectors(times, vectors):
-    times = np.asarray(times, dtype=float)
-    vectors = np.asarray(vectors, dtype=float)
-    if times.ndim != 1 or vectors.shape != (times.size, 3):
-        raise ValueError("Expected times shape (N,) and vectors shape (N,3).")
-    kind = "cubic" if times.size >= 4 else "linear"
-    components = [
-        interp1d(times, vectors[:, axis], kind=kind, bounds_error=True)
-        for axis in range(3)
-    ]
-
-    def sample(epoch):
-        epoch = np.asarray(epoch, dtype=float)
-        return np.stack([component(epoch) for component in components], axis=-1)
-
-    return sample
-
-
-def _canonical_header(text):
-    return re.sub(r"[^A-Z0-9]", "", text.upper())
-
-
-def _find_header(lines, soe_index):
-    for index in range(soe_index - 1, max(-1, soe_index - 16), -1):
-        candidate = next(csv.reader([lines[index]], skipinitialspace=True))
-        canonical = [_canonical_header(value) for value in candidate]
-        if all(axis in canonical for axis in ("X", "Y", "Z")):
-            return candidate
-    return None
-
-
-def read_horizons_vector_file(file_path):
-    path = Path(file_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"Missing JPL Horizons vector file: {path.name}")
-
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    try:
-        soe = next(i for i, line in enumerate(lines) if "$$SOE" in line)
-        eoe = next(i for i, line in enumerate(lines) if "$$EOE" in line and i > soe)
-    except StopIteration as exc:
-        raise ValueError(f"{path.name}: missing $$SOE/$$EOE markers.") from exc
-
-    header = _find_header(lines, soe)
-    if header is None:
-        raise ValueError(f"{path.name}: X, Y, Z header columns were not found.")
-
-    canonical = [_canonical_header(value) for value in header]
-    x_index, y_index, z_index = (canonical.index(axis) for axis in ("X", "Y", "Z"))
-    jd_index = next(
-        (canonical.index(name) for name in ("JDTDB", "JDUT", "JD") if name in canonical),
-        0,
+def request_horizons_text(target_id: str, observer: Observer) -> tuple[str, str]:
+    url = build_horizons_url(target_id, observer)
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "IERS-TN36-Ecliptical-Plane-Analysis/1.0",
+            "Accept": "application/json",
+        },
     )
 
-    epochs, vectors = [], []
-    for row in csv.reader(lines[soe + 1:eoe], skipinitialspace=True):
-        if not row or max(jd_index, x_index, y_index, z_index) >= len(row):
+    try:
+        with urlopen(request, timeout=90) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Horizons HTTP {exc.code}: {detail[:500]}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Horizons connection failed: {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Horizons returned invalid JSON.") from exc
+
+    signature = payload.get("signature", {})
+    source = str(signature.get("source", ""))
+    api_version = str(signature.get("version", ""))
+    result = payload.get("result")
+
+    if "NASA/JPL" not in source:
+        raise RuntimeError(f"Unexpected Horizons API source: {source!r}")
+    if not isinstance(result, str) or not result.strip():
+        error_text = payload.get("error", "No Horizons result text returned.")
+        raise RuntimeError(str(error_text))
+
+    return result, api_version
+
+
+def canonical_header(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", value.upper())
+
+
+def find_vector_header(lines: list[str], soe_index: int) -> list[str]:
+    for index in range(soe_index - 1, max(-1, soe_index - 20), -1):
+        row = next(csv.reader([lines[index]], skipinitialspace=True))
+        names = [canonical_header(item) for item in row]
+        if all(axis in names for axis in ("X", "Y", "Z")):
+            return row
+    raise ValueError("Horizons vector header was not found before $$SOE.")
+
+
+def parse_horizons_vectors(result_text: str, label: str) -> dict[str, np.ndarray]:
+    lines = result_text.splitlines()
+    try:
+        soe_index = next(i for i, line in enumerate(lines) if "$$SOE" in line)
+        eoe_index = next(
+            i for i, line in enumerate(lines) if i > soe_index and "$$EOE" in line
+        )
+    except StopIteration as exc:
+        diagnostic = result_text[-1000:]
+        raise ValueError(f"{label}: missing $$SOE/$$EOE markers.\n{diagnostic}") from exc
+
+    header = find_vector_header(lines, soe_index)
+    names = [canonical_header(item) for item in header]
+
+    jd_index = next(
+        (names.index(name) for name in ("JDUT", "JDTDB", "JD") if name in names),
+        None,
+    )
+    if jd_index is None:
+        raise ValueError(f"{label}: no Julian-date column found in {header!r}.")
+
+    indices = {
+        "x": names.index("X"),
+        "y": names.index("Y"),
+        "z": names.index("Z"),
+        "vx": names.index("VX"),
+        "vy": names.index("VY"),
+        "vz": names.index("VZ"),
+    }
+
+    epochs: list[float] = []
+    positions: list[list[float]] = []
+    velocities: list[list[float]] = []
+
+    for row in csv.reader(lines[soe_index + 1:eoe_index], skipinitialspace=True):
+        if not row:
+            continue
+        needed = [jd_index, *indices.values()]
+        if max(needed) >= len(row):
             continue
         try:
             epochs.append(float(row[jd_index]))
-            vectors.append([float(row[x_index]), float(row[y_index]), float(row[z_index])])
+            positions.append([float(row[indices[key]]) for key in ("x", "y", "z")])
+            velocities.append([float(row[indices[key]]) for key in ("vx", "vy", "vz")])
         except ValueError:
             continue
 
     table = {
-        "path": path,
-        "jd": np.asarray(epochs, dtype=float),
-        "position_km": np.asarray(vectors, dtype=float),
+        "jd_ut": np.asarray(epochs, dtype=float),
+        "position_km": np.asarray(positions, dtype=float),
+        "velocity_km_s": np.asarray(velocities, dtype=float),
     }
-    validate_vector_table(table, path.name)
+    validate_vector_table(table, label)
     return table
 
 
-def validate_vector_table(table, label):
-    epochs = np.asarray(table["jd"], dtype=float)
-    vectors = np.asarray(table["position_km"], dtype=float)
-    if epochs.size < 3:
-        raise ValueError(f"{label}: at least three valid vector records are required.")
-    if vectors.shape != (epochs.size, 3):
-        raise ValueError(f"{label}: vector array must have shape (N,3).")
-    if not np.all(np.isfinite(epochs)) or not np.all(np.isfinite(vectors)):
-        raise ValueError(f"{label}: non-finite values detected.")
+def validate_vector_table(table: dict[str, np.ndarray], label: str) -> None:
+    epochs = table["jd_ut"]
+    positions = table["position_km"]
+    velocities = table["velocity_km_s"]
+
+    if epochs.ndim != 1 or epochs.size < 3:
+        raise ValueError(f"{label}: fewer than three valid vector epochs.")
+    if positions.shape != (epochs.size, 3):
+        raise ValueError(f"{label}: invalid position shape {positions.shape}.")
+    if velocities.shape != (epochs.size, 3):
+        raise ValueError(f"{label}: invalid velocity shape {velocities.shape}.")
+    if not np.all(np.isfinite(epochs)):
+        raise ValueError(f"{label}: non-finite epochs detected.")
+    if not np.all(np.isfinite(positions)) or not np.all(np.isfinite(velocities)):
+        raise ValueError(f"{label}: non-finite state-vector values detected.")
     if np.any(np.diff(epochs) <= 0.0):
-        raise ValueError(f"{label}: Julian dates must increase strictly.")
-    if np.any(np.linalg.norm(vectors, axis=1) == 0.0):
-        raise ValueError(f"{label}: zero-length Cartesian vector detected.")
+        raise ValueError(f"{label}: epochs are not strictly increasing.")
+    if np.any(np.linalg.norm(positions, axis=1) == 0.0):
+        raise ValueError(f"{label}: zero-length position vector detected.")
 
 
-def load_available_horizons_vectors():
-    loaded = {}
-    for label, filename in (("sun", SUN_VECTOR_FILE), ("venus", VENUS_VECTOR_FILE)):
-        if Path(filename).is_file():
-            loaded[label] = read_horizons_vector_file(filename)
-
-    if len(loaded) == 2:
-        print("\nBODY      ROWS          JD START            JD END        R MIN km        R MAX km")
-        for label in ("sun", "venus"):
-            table = loaded[label]
-            radii = np.linalg.norm(table["position_km"], axis=1)
-            print(
-                f"{label.title():<8} {table['jd'].size:6d}  "
-                f"{table['jd'][0]:16.8f}  {table['jd'][-1]:16.8f}  "
-                f"{radii.min():15.3f}  {radii.max():15.3f}"
-            )
-    else:
-        print("\nJPL vector files not yet present in the Colab working directory.")
-        print(f"Required: {SUN_VECTOR_FILE}")
-        print(f"Required: {VENUS_VECTOR_FILE}")
-    return loaded
+def fetch_target_vectors(label: str, target_id: str) -> dict[str, np.ndarray]:
+    result_text, api_version = request_horizons_text(target_id, BUCARAMANGA)
+    table = parse_horizons_vectors(result_text, label)
+    table["api_version"] = np.asarray([api_version])
+    return table
 
 
-def common_epoch_grid(sun_table, venus_table):
-    start = max(sun_table["jd"][0], venus_table["jd"][0])
-    stop = min(sun_table["jd"][-1], venus_table["jd"][-1])
-    if stop <= start:
-        raise ValueError("Sun and Venus vector tables have no common interval.")
-    step = max(
-        np.median(np.diff(sun_table["jd"])),
-        np.median(np.diff(venus_table["jd"])),
-    )
-    count = int(np.floor((stop - start) / step)) + 1
-    epochs = start + np.arange(count, dtype=float) * step
-    if stop - epochs[-1] > 1.0e-10:
-        epochs = np.append(epochs, stop)
-    if epochs.size < 3:
-        raise ValueError("At least three synchronized epochs are required.")
-    return epochs
-
-
-def gnomonic_coordinates(unit_vectors, basis):
-    u_axis, v_axis, w_axis = basis
-    unit_vectors = np.asarray(unit_vectors, dtype=float)
-    denominator = unit_vectors @ w_axis
-    if np.any(denominator <= 0.0):
-        raise ValueError("Direction outside the forward tangent hemisphere.")
-    return np.column_stack(
-        ((unit_vectors @ u_axis) / denominator, (unit_vectors @ v_axis) / denominator)
-    )
-
-
-def empirical_solar_motion_basis(sun_directions):
-    sun_directions = normalize_rows(sun_directions)
-    w_axis = normalize(np.mean(sun_directions, axis=0))
-    u0, v0, _ = build_screen_basis(w_axis)
-    xy = gnomonic_coordinates(sun_directions, (u0, v0, w_axis))
-    centered = xy - np.mean(xy, axis=0)
-    _, singular_values, vh = np.linalg.svd(centered, full_matrices=False)
-    if singular_values[0] == 0.0:
-        raise ValueError("Solar directions do not define a motion axis.")
-    direction = vh[0]
-    if np.dot(direction, xy[-1] - xy[0]) < 0.0:
-        direction = -direction
-    u_axis = normalize(direction[0] * u0 + direction[1] * v0)
-    v_axis = normalize(np.cross(w_axis, u_axis))
-    return u_axis, v_axis, w_axis
-
-
-def signed_line_angle_deg(direction):
-    angle = float(np.degrees(np.arctan2(direction[1], direction[0])))
-    while angle > 90.0:
-        angle -= 180.0
-    while angle <= -90.0:
-        angle += 180.0
-    return angle
-
-
-def orthogonal_track_fit(x_values, y_values):
-    points = np.column_stack((x_values, y_values)).astype(float)
-    centroid = np.mean(points, axis=0)
-    _, singular_values, vh = np.linalg.svd(points - centroid, full_matrices=False)
-    direction = vh[0]
-    if np.dot(direction, points[-1] - points[0]) < 0.0:
-        direction = -direction
-    normal = np.array([-direction[1], direction[0]])
-    along = (points - centroid) @ direction
-    cross = (points - centroid) @ normal
+def fetch_bucaramanga_vectors() -> dict[str, dict[str, np.ndarray]]:
     return {
-        "centroid": centroid,
-        "direction": direction,
-        "normal": normal,
-        "along": along,
-        "cross": cross,
-        "angle_deg": signed_line_angle_deg(direction),
-        "rms_cross_arcsec": float(np.sqrt(np.mean(cross ** 2))),
-        "singular_values": singular_values,
+        label: fetch_target_vectors(label, target_id)
+        for label, target_id in TARGETS.items()
     }
 
 
-def derive_track_in_basis(epochs, sun_vectors, venus_vectors, basis):
-    sun_directions = normalize_rows(sun_vectors)
-    venus_directions = normalize_rows(venus_vectors)
-    sun_xy = gnomonic_coordinates(sun_directions, basis)
-    venus_xy = gnomonic_coordinates(venus_directions, basis)
-    relative = (venus_xy - sun_xy) * ARCSEC_PER_RAD
-    separation = np.linalg.norm(relative, axis=1)
-    closest_index = int(np.argmin(separation))
-    fit = orthogonal_track_fit(relative[:, 0], relative[:, 1])
-    return {
-        "jd": epochs,
-        "sun_vectors_km": sun_vectors,
-        "venus_vectors_km": venus_vectors,
-        "x_arcsec": relative[:, 0],
-        "y_arcsec": relative[:, 1],
-        "separation_arcsec": separation,
-        "closest_index": closest_index,
-        "fit": fit,
-        "basis": basis,
-    }
+def vector_cadence_seconds(epochs: np.ndarray) -> float:
+    return float(np.median(np.diff(epochs)) * 86400.0)
 
 
-def derive_apparent_track(sun_table, venus_table):
-    epochs = common_epoch_grid(sun_table, venus_table)
-    sun_vectors = interpolate_vectors(
-        sun_table["jd"], sun_table["position_km"]
-    )(epochs)
-    venus_vectors = interpolate_vectors(
-        venus_table["jd"], venus_table["position_km"]
-    )(epochs)
-    basis = empirical_solar_motion_basis(normalize_rows(sun_vectors))
-    return derive_track_in_basis(epochs, sun_vectors, venus_vectors, basis)
+def display_acquisition_summary(tables: dict[str, dict[str, np.ndarray]]) -> None:
+    print("\nJPL HORIZONS VECTOR ACQUISITION")
+    print("BODY      ROWS     CADENCE s          JD UT START            JD UT END       R MIN km       R MAX km")
+    for label in ("Sun", "Venus"):
+        table = tables[label]
+        epochs = table["jd_ut"]
+        radii = np.linalg.norm(table["position_km"], axis=1)
+        print(
+            f"{label:<8} {epochs.size:6d}  {vector_cadence_seconds(epochs):12.6f}  "
+            f"{epochs[0]:19.10f}  {epochs[-1]:19.10f}  "
+            f"{radii.min():13.3f}  {radii.max():13.3f}"
+        )
 
-
-def vector_derivative(epochs_jd, vectors):
-    seconds = (np.asarray(epochs_jd, dtype=float) - epochs_jd[0]) * SECONDS_PER_DAY
-    edge_order = 2 if len(seconds) >= 3 else 1
-    return np.gradient(np.asarray(vectors, dtype=float), seconds, axis=0, edge_order=edge_order)
-
-
-def derive_ecliptic_plane_normal(epochs_jd, sun_vectors):
-    velocities = vector_derivative(epochs_jd, sun_vectors)
-    angular_momentum = np.cross(sun_vectors, velocities)
-    norms = np.linalg.norm(angular_momentum, axis=1)
-    valid = np.isfinite(norms) & (norms > 0.0)
-    if np.count_nonzero(valid) < 3:
-        raise ValueError("Insufficient vectors to derive the local ecliptic plane.")
-
-    normals = angular_momentum[valid] / norms[valid, None]
-    reference = normals[len(normals) // 2].copy()
-    normals[np.einsum("ij,j->i", normals, reference) < 0.0] *= -1.0
-    normal = normalize(np.average(normals, axis=0, weights=norms[valid]))
-
-    sun_directions = normalize_rows(sun_vectors)
-    departures = np.arcsin(np.clip(sun_directions @ normal, -1.0, 1.0))
-    rms_plane_arcsec = float(np.sqrt(np.mean(departures ** 2)) * ARCSEC_PER_RAD)
-    scatter = np.arccos(np.clip(normals @ normal, -1.0, 1.0))
-    normal_scatter_arcsec = float(np.sqrt(np.mean(scatter ** 2)) * ARCSEC_PER_RAD)
-    return normal, rms_plane_arcsec, normal_scatter_arcsec
-
-
-def ecliptic_screen_basis(ecliptic_normal, reference_axis, sun_directions):
-    w_axis = normalize(reference_axis)
-    u_axis = normalize(np.cross(ecliptic_normal, w_axis))
-    displacement = sun_directions[-1] - sun_directions[0]
-    if np.dot(u_axis, displacement) < 0.0:
-        u_axis = -u_axis
-    v_axis = normalize(np.cross(w_axis, u_axis))
-    return u_axis, v_axis, w_axis
-
-
-def derive_ecliptic_track(apparent_track):
-    sun_vectors = apparent_track["sun_vectors_km"]
-    venus_vectors = apparent_track["venus_vectors_km"]
-    epochs = apparent_track["jd"]
-    normal, plane_rms, normal_scatter = derive_ecliptic_plane_normal(epochs, sun_vectors)
-    sun_directions = normalize_rows(sun_vectors)
-    reference_axis = apparent_track["basis"][2]
-    basis = ecliptic_screen_basis(normal, reference_axis, sun_directions)
-    track = derive_track_in_basis(epochs, sun_vectors, venus_vectors, basis)
-    track["ecliptic_normal"] = normal
-    track["plane_rms_arcsec"] = plane_rms
-    track["normal_scatter_arcsec"] = normal_scatter
-
-    empirical_u = apparent_track["basis"][0]
-    rotation = np.degrees(
-        np.arctan2(np.dot(empirical_u, basis[1]), np.dot(empirical_u, basis[0]))
-    )
-    while rotation > 90.0:
-        rotation -= 180.0
-    while rotation <= -90.0:
-        rotation += 180.0
-    track["basis_rotation_deg"] = float(rotation)
-    return track
-
-
-def display_track_comparison(apparent_track, ecliptic_track):
-    a_index = apparent_track["closest_index"]
-    e_index = ecliptic_track["closest_index"]
-    print("\nTRACK ANGLE COMPARISON — JPL VECTORS ONLY")
-    print("FRAME                     ANGLE deg     RMS NORMAL arcsec       CA JD TDB       CA SEP arcsec")
+    print("\nCENTER              LONGITUDE deg     LATITUDE deg     ELEVATION km     FRAME     CORRECTION")
     print(
-        f"Empirical solar motion   {apparent_track['fit']['angle_deg']:10.6f}"
-        f"     {apparent_track['fit']['rms_cross_arcsec']:17.6f}"
-        f"     {apparent_track['jd'][a_index]:13.8f}"
-        f"     {apparent_track['separation_arcsec'][a_index]:13.6f}"
-    )
-    print(
-        f"Derived ecliptic plane   {ecliptic_track['fit']['angle_deg']:10.6f}"
-        f"     {ecliptic_track['fit']['rms_cross_arcsec']:17.6f}"
-        f"     {ecliptic_track['jd'][e_index]:13.8f}"
-        f"     {ecliptic_track['separation_arcsec'][e_index]:13.6f}"
-    )
-    print("\nECLIPTIC PLANE DIAGNOSTICS")
-    print("BASIS ROTATION deg     SUN-PLANE RMS arcsec     NORMAL SCATTER arcsec")
-    print(
-        f"{ecliptic_track['basis_rotation_deg']:18.6f}"
-        f"     {ecliptic_track['plane_rms_arcsec']:20.6f}"
-        f"     {ecliptic_track['normal_scatter_arcsec']:21.6f}"
+        f"{BUCARAMANGA.center:<19} {BUCARAMANGA.longitude_deg:13.6f}  "
+        f"{BUCARAMANGA.latitude_deg:13.6f}  {BUCARAMANGA.elevation_km:13.6f}  "
+        f"{'ICRF':<8}  NONE"
     )
 
 
-def plot_track_comparison(apparent_track, ecliptic_track):
-    fig, axis = plt.subplots(figsize=(8.0, 6.0))
-    axis.plot(
-        apparent_track["x_arcsec"],
-        apparent_track["y_arcsec"],
-        linewidth=1.1,
-        label=f"Empirical basis {apparent_track['fit']['angle_deg']:.6f}°",
-    )
-    axis.plot(
-        ecliptic_track["x_arcsec"],
-        ecliptic_track["y_arcsec"],
-        linewidth=1.1,
-        label=f"Ecliptic basis {ecliptic_track['fit']['angle_deg']:.6f}°",
-    )
-    axis.set_aspect("equal", adjustable="datalim")
-    axis.set_xlabel("Tangent-plane X (arcsec)")
-    axis.set_ylabel("Tangent-plane Y (arcsec)")
-    axis.set_title("Bucaramanga 2012 Venus Transit — Derived Coordinate Frames")
-    axis.grid(True, linewidth=0.5, alpha=0.35)
-    axis.legend()
-    plt.show()
-
-
-def geometry_self_test():
-    line_of_sight = normalize([1.0, 0.2, 0.1])
-    relative = np.array([1200.0, -350.0, 800.0])
-    u_axis, v_axis, w_axis = build_screen_basis(line_of_sight)
-    projected = relative - np.dot(relative, w_axis) * w_axis
-    return float(np.dot(projected, u_axis)), float(np.dot(projected, v_axis))
-
-
-def main():
-    screen_x, screen_y = geometry_self_test()
+def main() -> None:
     print("IERS TN36 - Ecliptical Plane Analysis")
     print(f"Version : {VERSION}")
-    print(f"Observer: {OBSERVER['name']}")
-    print(f"Transit : {TRANSIT['date_utc']}")
-    print(f"Geometry self-test: X={screen_x:.6f} km  Y={screen_y:.6f} km")
-
-    loaded = load_available_horizons_vectors()
-    if len(loaded) == 2:
-        apparent_track = derive_apparent_track(loaded["sun"], loaded["venus"])
-        ecliptic_track = derive_ecliptic_track(apparent_track)
-        display_track_comparison(apparent_track, ecliptic_track)
-        plot_track_comparison(apparent_track, ecliptic_track)
+    print(f"Observer: {BUCARAMANGA.name}")
+    print("Transit : 2012-06-06")
+    tables = fetch_bucaramanga_vectors()
+    display_acquisition_summary(tables)
 
 
 if __name__ == "__main__":
