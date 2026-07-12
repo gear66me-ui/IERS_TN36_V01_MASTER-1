@@ -31,7 +31,7 @@ target = widgets.Text(
     style={"description_width": "95px"},
 )
 token = widgets.Password(
-    placeholder="Fine-grained GitHub token",
+    placeholder="Used only if GITHUB_TOKEN is blank",
     description="Token:",
     layout=widgets.Layout(width="100%"),
     style={"description_width": "95px"},
@@ -46,6 +46,10 @@ upload = widgets.Button(
 status = widgets.Output(
     layout={"border": "1px solid #888", "padding": "8px", "margin": "8px 0 0 0"}
 )
+
+
+def configured_token() -> str:
+    return os.environ.get("GITHUB_TOKEN", "").strip() or token.value.strip()
 
 
 def scan_notebooks() -> list[tuple[str, str]]:
@@ -66,7 +70,7 @@ def scan_notebooks() -> list[tuple[str, str]]:
                     label = f"{relative}  [{stat.st_size / 1048576:.3f} MiB]"
                     found.append((stat.st_mtime, label, str(path)))
                 except OSError:
-                    pass
+                    continue
 
     found.sort(reverse=True)
     return [(label, path) for _, label, path in found[:200]]
@@ -76,14 +80,20 @@ def refresh_list(_=None) -> None:
     with status:
         status.clear_output()
         print("Scanning Google Drive...")
+
     options = scan_notebooks()
     notebook.options = options
+
     with status:
         status.clear_output()
         if options:
             notebook.value = options[0][1]
             print(f"Found {len(options)} notebook(s).")
             print(f"Newest: {options[0][0]}")
+            if os.environ.get("GITHUB_TOKEN", "").strip():
+                print("GitHub token loaded from the Colab cell.")
+            else:
+                print("GitHub token is blank.")
         else:
             print("No .ipynb files found in My Drive/Colab Notebooks.")
 
@@ -99,9 +109,10 @@ def github_error(response: requests.Response) -> str:
 def upload_notebook(_=None) -> None:
     with status:
         status.clear_output()
+
         source_text = notebook.value
         target_path = target.value.strip().lstrip("/")
-        secret = token.value.strip()
+        secret = configured_token()
 
         if not source_text:
             print("ERROR: Select a notebook.")
@@ -110,7 +121,7 @@ def upload_notebook(_=None) -> None:
             print("ERROR: GitHub filename must end in .ipynb.")
             return
         if not secret:
-            print("ERROR: Enter a GitHub token.")
+            print('ERROR: Put your token between the quotes in GITHUB_TOKEN="".')
             return
 
         source = Path(source_text)
@@ -136,12 +147,24 @@ def upload_notebook(_=None) -> None:
         )
 
         print(f"Uploading {source.name} ({len(raw) / 1048576:.3f} MiB)...")
-        existing = requests.get(api, headers=headers, params={"ref": BRANCH}, timeout=60)
+
+        try:
+            existing = requests.get(
+                api,
+                headers=headers,
+                params={"ref": BRANCH},
+                timeout=60,
+            )
+        except requests.RequestException as exc:
+            print(f"ERROR contacting GitHub: {exc}")
+            return
+
         payload = {
             "message": f"Upload {Path(target_path).name} from Google Colab",
             "branch": BRANCH,
             "content": base64.b64encode(raw).decode("ascii"),
         }
+
         if existing.status_code == 200:
             payload["sha"] = existing.json()["sha"]
         elif existing.status_code != 404:
@@ -149,8 +172,19 @@ def upload_notebook(_=None) -> None:
             token.value = ""
             return
 
-        response = requests.put(api, headers=headers, json=payload, timeout=300)
-        token.value = ""
+        try:
+            response = requests.put(
+                api,
+                headers=headers,
+                json=payload,
+                timeout=300,
+            )
+        except requests.RequestException as exc:
+            print(f"ERROR during upload: {exc}")
+            return
+        finally:
+            token.value = ""
+
         if response.status_code not in (200, 201):
             print(f"ERROR {response.status_code}: {github_error(response)}")
             return
@@ -158,29 +192,46 @@ def upload_notebook(_=None) -> None:
         data = response.json()
         github_url = data.get("content", {}).get("html_url", "")
         colab_url = (
-            f"https://colab.research.google.com/github/{REPOSITORY}/blob/"
-            f"{BRANCH}/{target_path}"
+            "https://colab.research.google.com/github/"
+            f"{REPOSITORY}/blob/{BRANCH}/{target_path}"
         )
+
         print("SUCCESS — notebook committed to GitHub.")
         if github_url:
-            display(HTML(f'<a href="{github_url}" target="_blank"><b>Open on GitHub</b></a>'))
-        display(HTML(f'<br><a href="{colab_url}" target="_blank"><b>Open GitHub-backed notebook in Colab</b></a>'))
+            display(
+                HTML(
+                    f'<a href="{github_url}" target="_blank">'
+                    "<b>Open on GitHub</b></a>"
+                )
+            )
+        display(
+            HTML(
+                f'<br><a href="{colab_url}" target="_blank">'
+                "<b>Open GitHub-backed notebook in Colab</b></a>"
+            )
+        )
 
 
 refresh.on_click(refresh_list)
 upload.on_click(upload_notebook)
 
-display(
-    widgets.VBox(
-        [
-            widgets.HTML("<h3>Drive → GitHub Notebook Uploader</h3>"),
-            refresh,
-            notebook,
-            target,
-            token,
-            upload,
-            status,
-        ]
-    )
+token_loaded = bool(os.environ.get("GITHUB_TOKEN", "").strip())
+token_notice = widgets.HTML(
+    "<b>Token:</b> loaded from the Colab cell."
+    if token_loaded
+    else "<b>Token:</b> blank; enter it above or in the loader cell."
 )
+
+items = [
+    widgets.HTML("<h3>Drive → GitHub Notebook Uploader</h3>"),
+    refresh,
+    notebook,
+    target,
+    token_notice,
+]
+if not token_loaded:
+    items.append(token)
+items.extend([upload, status])
+
+display(widgets.VBox(items))
 refresh_list()
