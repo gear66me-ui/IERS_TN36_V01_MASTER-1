@@ -1,6 +1,6 @@
 """
 IERS TN36 — Ecliptical Plane Analysis
-Part H — North Pole 2012 track-angle sanity check
+Part I — Restored 2012 North/South Pole common solar-screen sanity check
 """
 
 from __future__ import annotations
@@ -10,552 +10,370 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import CubicSpline
-from scipy.optimize import minimize_scalar
+from scipy.optimize import brentq, minimize_scalar
 
-VERSION = "IERS-0001-H"
-HORIZONS_API = "https://ssd.jpl.nasa.gov/api/horizons.api"
-ARCSEC_PER_RAD = 206_264.80624709636
-SECONDS_PER_DAY = 86_400.0
-
-START_TIME_UTC = "2012-06-05 21:00"
-STOP_TIME_UTC = "2012-06-06 07:00"
-STEP_SIZE = "1 min"
-FIT_HALF_WINDOW_HOURS = 3.25
+VERSION = "IERS-0001-I"
+API = "https://ssd.jpl.nasa.gov/api/horizons.api"
+ASEC = 206264.80624709636
+DAY = 86400.0
+RSUN = 695700.0
+RVENUS = 6051.8
+START = "2012-06-05 20:00"
+STOP = "2012-06-06 07:30"
+STEP = "1 min"
 
 
 @dataclass(frozen=True)
-class Observer:
-    name: str
-    longitude_deg: float
-    latitude_deg: float
-    elevation_km: float
-    center_body: int = 399
+class Site:
+    key: str
+    label: str
+    lon: float
+    lat: float
+    elev: float
 
     @property
-    def center(self) -> str:
-        return f"coord@{self.center_body}"
-
-    @property
-    def site_coord(self) -> str:
-        return (
-            f"{self.longitude_deg:.8f},"
-            f"{self.latitude_deg:.8f},"
-            f"{self.elevation_km:.6f}"
-        )
+    def coord(self) -> str:
+        return f"{self.lon:.8f},{self.lat:.8f},{self.elev:.6f}"
 
 
-NORTH_POLE = Observer(
-    name="Geodetic North Pole",
-    longitude_deg=0.0,
-    latitude_deg=90.0,
-    elevation_km=0.0,
-)
-
-TARGETS = {"Sun": "10", "Venus": "299"}
+NP = Site("NP", "North Pole", 0.0, 90.0, 0.0)
+SP = Site("SP", "South Pole", 0.0, -90.0, 0.0)
+SITES = (NP, SP)
 
 
-def normalize(vector: np.ndarray) -> np.ndarray:
-    vector = np.asarray(vector, dtype=float)
-    magnitude = np.linalg.norm(vector)
-    if not np.isfinite(magnitude) or magnitude == 0.0:
-        raise ValueError("Cannot normalize a zero or non-finite vector.")
-    return vector / magnitude
+def unit(v):
+    v = np.asarray(v, float)
+    n = np.linalg.norm(v)
+    if not np.isfinite(n) or n == 0.0:
+        raise ValueError("Invalid zero/non-finite vector.")
+    return v / n
 
 
-def normalize_rows(vectors: np.ndarray) -> np.ndarray:
-    vectors = np.asarray(vectors, dtype=float)
-    magnitudes = np.linalg.norm(vectors, axis=1)
-    if np.any(~np.isfinite(magnitudes)) or np.any(magnitudes == 0.0):
-        raise ValueError("Cannot normalize zero or non-finite vector rows.")
-    return vectors / magnitudes[:, None]
-
-
-def quoted(value: str) -> str:
+def q(value):
     return f"'{value}'"
 
 
-def build_horizons_parameters(target_id: str, observer: Observer) -> Dict[str, str]:
-    return {
+def request_vectors(target, center, label, site=None):
+    p = {
         "format": "json",
-        "COMMAND": quoted(target_id),
-        "OBJ_DATA": quoted("NO"),
-        "MAKE_EPHEM": quoted("YES"),
-        "EPHEM_TYPE": quoted("VECTORS"),
-        "CENTER": quoted(observer.center),
-        "COORD_TYPE": quoted("GEODETIC"),
-        "SITE_COORD": quoted(observer.site_coord),
-        "START_TIME": quoted(START_TIME_UTC),
-        "STOP_TIME": quoted(STOP_TIME_UTC),
-        "STEP_SIZE": quoted(STEP_SIZE),
-        "TIME_TYPE": quoted("UT"),
-        "TIME_DIGITS": quoted("SECONDS"),
-        "REF_PLANE": quoted("FRAME"),
-        "REF_SYSTEM": quoted("ICRF"),
-        "OUT_UNITS": quoted("KM-S"),
-        "VEC_TABLE": quoted("2"),
-        "VEC_CORR": quoted("NONE"),
-        "CSV_FORMAT": quoted("YES"),
-        "VEC_LABELS": quoted("YES"),
+        "COMMAND": q(target),
+        "OBJ_DATA": q("NO"),
+        "MAKE_EPHEM": q("YES"),
+        "EPHEM_TYPE": q("VECTORS"),
+        "CENTER": q(center),
+        "START_TIME": q(START),
+        "STOP_TIME": q(STOP),
+        "STEP_SIZE": q(STEP),
+        "TIME_TYPE": q("UT"),
+        "TIME_DIGITS": q("SECONDS"),
+        "REF_PLANE": q("FRAME"),
+        "REF_SYSTEM": q("ICRF"),
+        "OUT_UNITS": q("KM-S"),
+        "VEC_TABLE": q("2"),
+        "VEC_CORR": q("NONE"),
+        "CSV_FORMAT": q("YES"),
+        "VEC_LABELS": q("YES"),
     }
+    if site is not None:
+        p["COORD_TYPE"] = q("GEODETIC")
+        p["SITE_COORD"] = q(site.coord)
 
-
-def request_horizons_text(target_id: str, observer: Observer) -> str:
-    url = f"{HORIZONS_API}?{urlencode(build_horizons_parameters(target_id, observer))}"
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "IERS-TN36-Ecliptical-Plane-Analysis/1.0",
-            "Accept": "application/json",
-        },
+    req = Request(
+        f"{API}?{urlencode(p)}",
+        headers={"User-Agent": "IERS-TN36/1.0", "Accept": "application/json"},
     )
+    with urlopen(req, timeout=90) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if "NASA/JPL" not in str(payload.get("signature", {}).get("source", "")):
+        raise RuntimeError("Unexpected Horizons source.")
+    text = payload.get("result")
+    if not isinstance(text, str):
+        raise RuntimeError(str(payload.get("error", "No Horizons result.")))
+    return parse_vectors(text, label)
+
+
+def canon(text):
+    return re.sub(r"[^A-Z0-9]", "", text.upper())
+
+
+def parse_vectors(text, label):
+    lines = text.splitlines()
     try:
-        with urlopen(request, timeout=90) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Horizons HTTP {exc.code}: {detail[:500]}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"Horizons connection failed: {exc.reason}") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Horizons returned invalid JSON.") from exc
-
-    signature = payload.get("signature", {})
-    if "NASA/JPL" not in str(signature.get("source", "")):
-        raise RuntimeError("Unexpected Horizons API source.")
-    result = payload.get("result")
-    if not isinstance(result, str) or not result.strip():
-        raise RuntimeError(str(payload.get("error", "No Horizons result returned.")))
-    return result
-
-
-def canonical_header(value: str) -> str:
-    return re.sub(r"[^A-Z0-9]", "", value.upper())
-
-
-def parse_horizons_vectors(result_text: str, label: str) -> dict[str, np.ndarray]:
-    lines = result_text.splitlines()
-    try:
-        soe_index = next(i for i, line in enumerate(lines) if "$$SOE" in line)
-        eoe_index = next(
-            i for i, line in enumerate(lines) if i > soe_index and "$$EOE" in line
-        )
+        soe = next(i for i, line in enumerate(lines) if "$$SOE" in line)
+        eoe = next(i for i, line in enumerate(lines) if i > soe and "$$EOE" in line)
     except StopIteration as exc:
-        raise ValueError(f"{label}: missing $$SOE/$$EOE markers.") from exc
+        raise ValueError(f"{label}: missing Horizons data markers.") from exc
 
     header = None
-    for index in range(soe_index - 1, max(-1, soe_index - 20), -1):
-        candidate = next(csv.reader([lines[index]], skipinitialspace=True))
-        names = [canonical_header(item) for item in candidate]
-        if all(axis in names for axis in ("X", "Y", "Z", "VX", "VY", "VZ")):
-            header = candidate
+    for i in range(soe - 1, max(-1, soe - 20), -1):
+        row = next(csv.reader([lines[i]], skipinitialspace=True))
+        names = [canon(x) for x in row]
+        if all(x in names for x in ("X", "Y", "Z")):
+            header = row
             break
     if header is None:
         raise ValueError(f"{label}: vector header not found.")
 
-    names = [canonical_header(item) for item in header]
-    jd_index = next(
-        (names.index(name) for name in ("JDUT", "JDTDB", "JD") if name in names),
-        None,
-    )
-    if jd_index is None:
-        raise ValueError(f"{label}: Julian-date column not found.")
-
-    indices = {
-        key: names.index(key.upper())
-        for key in ("x", "y", "z", "vx", "vy", "vz")
-    }
-
-    epochs: list[float] = []
-    positions: list[list[float]] = []
-    velocities: list[list[float]] = []
-
-    for row in csv.reader(lines[soe_index + 1:eoe_index], skipinitialspace=True):
-        if not row or max([jd_index, *indices.values()]) >= len(row):
+    names = [canon(x) for x in header]
+    ji = next(names.index(x) for x in ("JDUT", "JDTDB", "JD") if x in names)
+    xi, yi, zi = names.index("X"), names.index("Y"), names.index("Z")
+    jd, xyz = [], []
+    for row in csv.reader(lines[soe + 1:eoe], skipinitialspace=True):
+        if not row or max(ji, xi, yi, zi) >= len(row):
             continue
         try:
-            epochs.append(float(row[jd_index]))
-            positions.append([float(row[indices[key]]) for key in ("x", "y", "z")])
-            velocities.append([float(row[indices[key]]) for key in ("vx", "vy", "vz")])
+            jd.append(float(row[ji]))
+            xyz.append([float(row[xi]), float(row[yi]), float(row[zi])])
         except ValueError:
-            continue
+            pass
 
-    table = {
-        "jd_ut": np.asarray(epochs, dtype=float),
-        "position_km": np.asarray(positions, dtype=float),
-        "velocity_km_s": np.asarray(velocities, dtype=float),
+    jd = np.asarray(jd, float)
+    xyz = np.asarray(xyz, float)
+    if jd.size < 3 or xyz.shape != (jd.size, 3):
+        raise ValueError(f"{label}: invalid vector table.")
+    return {"jd": jd, "xyz": xyz}
+
+
+def fetch_all():
+    data = {
+        "GS": request_vectors("10", "500@399", "Geocenter Sun"),
+        "GV": request_vectors("299", "500@399", "Geocenter Venus"),
     }
-    validate_vector_table(table, label)
-    return table
-
-
-def validate_vector_table(table: dict[str, np.ndarray], label: str) -> None:
-    epochs = table["jd_ut"]
-    positions = table["position_km"]
-    velocities = table["velocity_km_s"]
-    if epochs.ndim != 1 or epochs.size < 3:
-        raise ValueError(f"{label}: fewer than three valid epochs.")
-    if positions.shape != (epochs.size, 3):
-        raise ValueError(f"{label}: invalid position shape {positions.shape}.")
-    if velocities.shape != (epochs.size, 3):
-        raise ValueError(f"{label}: invalid velocity shape {velocities.shape}.")
-    if not np.all(np.isfinite(epochs)):
-        raise ValueError(f"{label}: non-finite epochs detected.")
-    if not np.all(np.isfinite(positions)) or not np.all(np.isfinite(velocities)):
-        raise ValueError(f"{label}: non-finite state vectors detected.")
-    if np.any(np.diff(epochs) <= 0.0):
-        raise ValueError(f"{label}: epochs are not strictly increasing.")
-
-
-def fetch_north_pole_vectors() -> dict[str, dict[str, np.ndarray]]:
-    tables = {
-        label: parse_horizons_vectors(
-            request_horizons_text(target_id, NORTH_POLE),
-            label,
+    for site in SITES:
+        data[f"{site.key}S"] = request_vectors(
+            "10", "coord@399", f"{site.label} Sun", site
         )
-        for label, target_id in TARGETS.items()
-    }
-    sun_jd = tables["Sun"]["jd_ut"]
-    venus_jd = tables["Venus"]["jd_ut"]
-    if sun_jd.shape != venus_jd.shape or not np.allclose(
-        sun_jd, venus_jd, atol=1e-12
-    ):
-        raise ValueError("Sun and Venus epochs are not synchronized.")
-    return tables
-
-
-def angular_separation_rad(vector_a: np.ndarray, vector_b: np.ndarray) -> float:
-    unit_a = normalize(vector_a)
-    unit_b = normalize(vector_b)
-    return float(
-        np.arctan2(
-            np.linalg.norm(np.cross(unit_a, unit_b)),
-            np.dot(unit_a, unit_b),
+        data[f"{site.key}V"] = request_vectors(
+            "299", "coord@399", f"{site.label} Venus", site
         )
+
+    jd = data["GS"]["jd"]
+    for key, table in data.items():
+        if table["jd"].shape != jd.shape or not np.allclose(table["jd"], jd, atol=1e-12):
+            raise ValueError(f"{key}: unsynchronized epochs.")
+    return data
+
+
+def build_cache(data):
+    cache = {"jd": data["GS"]["jd"]}
+    for key, table in data.items():
+        cache[key] = CubicSpline(
+            table["jd"], table["xyz"], axis=0, bc_type="natural"
+        )
+    return cache
+
+
+def vec(cache, key, jd):
+    return np.asarray(cache[key](jd), float)
+
+
+def separation(cache, sun_key, venus_key, jd):
+    a, b = unit(vec(cache, sun_key, jd)), unit(vec(cache, venus_key, jd))
+    return float(np.arctan2(np.linalg.norm(np.cross(a, b)), np.dot(a, b)) * ASEC)
+
+
+def radii(cache, site, jd):
+    sun = vec(cache, f"{site.key}S", jd)
+    venus = vec(cache, f"{site.key}V", jd)
+    return (
+        float(np.arctan2(RSUN, np.linalg.norm(sun)) * ASEC),
+        float(np.arctan2(RVENUS, np.linalg.norm(venus)) * ASEC),
     )
 
 
-def state_spline(table: dict[str, np.ndarray]) -> tuple[float, CubicSpline]:
-    jd0 = float(table["jd_ut"][0])
-    seconds = (table["jd_ut"] - jd0) * SECONDS_PER_DAY
-    return jd0, CubicSpline(seconds, table["position_km"], axis=0)
+def contact_value(cache, site, kind, jd):
+    sep = separation(cache, f"{site.key}S", f"{site.key}V", jd)
+    rs, rv = radii(cache, site, jd)
+    return sep - (rs + rv if kind == "external" else rs - rv)
 
 
-def refine_closest_approach(
-    sun_table: dict[str, np.ndarray],
-    venus_table: dict[str, np.ndarray],
-) -> dict[str, object]:
-    epochs = sun_table["jd_ut"]
-    sampled = np.array(
-        [
-            angular_separation_rad(sun_vector, venus_vector)
-            for sun_vector, venus_vector in zip(
-                sun_table["position_km"],
-                venus_table["position_km"],
+def roots(cache, site, kind):
+    jd = cache["jd"]
+    values = np.array([contact_value(cache, site, kind, t) for t in jd])
+    found = []
+    for i in range(len(jd) - 1):
+        if values[i] == 0.0:
+            found.append(float(jd[i]))
+        elif values[i] * values[i + 1] < 0.0:
+            found.append(
+                float(
+                    brentq(
+                        lambda t: contact_value(cache, site, kind, t),
+                        jd[i],
+                        jd[i + 1],
+                        xtol=1e-13,
+                        rtol=1e-13,
+                    )
+                )
             )
-        ]
-    )
-    index = int(np.argmin(sampled))
-    left = max(0, index - 3)
-    right = min(epochs.size - 1, index + 3)
+    return found
 
-    jd0, sun_spline = state_spline(sun_table)
-    venus_jd0, venus_spline = state_spline(venus_table)
-    if abs(jd0 - venus_jd0) > 1e-12:
-        raise ValueError("Interpolation origins do not match.")
-    seconds = (epochs - jd0) * SECONDS_PER_DAY
 
-    def objective(epoch_seconds: float) -> float:
-        separation = angular_separation_rad(
-            sun_spline(epoch_seconds),
-            venus_spline(epoch_seconds),
-        )
-        return separation * separation
+def contacts(cache):
+    result = {}
+    for site in SITES:
+        ext = roots(cache, site, "external")
+        inte = roots(cache, site, "internal")
+        if len(ext) < 2 or len(inte) < 2:
+            raise RuntimeError(f"{site.label}: contacts not recovered.")
+        result[site.key] = {
+            "C1": ext[0],
+            "C2": inte[0],
+            "C3": inte[-1],
+            "C4": ext[-1],
+        }
+    return result
 
+
+def geocentric_ca(cache):
+    jd = cache["jd"]
+    sampled = np.array([separation(cache, "GS", "GV", t) for t in jd])
+    i = int(np.argmin(sampled))
     result = minimize_scalar(
-        objective,
-        bounds=(float(seconds[left]), float(seconds[right])),
+        lambda t: separation(cache, "GS", "GV", t),
+        bounds=(jd[max(0, i - 3)], jd[min(len(jd) - 1, i + 3)]),
         method="bounded",
-        options={"xatol": 1e-7},
+        options={"xatol": 1e-12},
     )
     if not result.success:
-        raise RuntimeError(f"Closest-approach optimization failed: {result.message}")
-
-    ca_seconds = float(result.x)
-    return {
-        "jd0": jd0,
-        "ca_seconds": ca_seconds,
-        "ca_jd_ut": jd0 + ca_seconds / SECONDS_PER_DAY,
-        "ca_separation_arcsec": np.sqrt(float(result.fun)) * ARCSEC_PER_RAD,
-        "sun_spline": sun_spline,
-        "venus_spline": venus_spline,
-    }
+        raise RuntimeError("Closest-approach fit failed.")
+    return float(result.x), float(result.fun)
 
 
-def fixed_x_ray_screen(unit_vectors: np.ndarray) -> np.ndarray:
-    unit_vectors = np.asarray(unit_vectors, dtype=float)
-    denominator = unit_vectors[:, 0]
-    if np.any(np.abs(denominator) < 1e-10):
-        raise ValueError("A direction is singular on the fixed +X ray screen.")
-    return np.column_stack(
-        (unit_vectors[:, 1] / denominator, unit_vectors[:, 2] / denominator)
-    )
+def screen_basis(cache, ca_jd):
+    n = unit(vec(cache, "GS", ca_jd))
+    k = np.array([0.0, 0.0, 1.0])
+    if np.linalg.norm(np.cross(k, n)) < 1e-12:
+        k = np.array([1.0, 0.0, 0.0])
+    xhat = unit(np.cross(k, n))
+    yhat = unit(np.cross(n, xhat))
+    return n, xhat, yhat
 
 
-def fixed_yz_component_screen(unit_vectors: np.ndarray) -> np.ndarray:
-    unit_vectors = np.asarray(unit_vectors, dtype=float)
-    return unit_vectors[:, 1:3]
-
-
-def ca_tangent_basis(
-    ca_sun_direction: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    sightline = normalize(ca_sun_direction)
-    celestial_north = np.array([0.0, 0.0, 1.0])
-    east = np.cross(celestial_north, sightline)
-    if np.linalg.norm(east) < 1e-12:
-        celestial_north = np.array([0.0, 1.0, 0.0])
-        east = np.cross(celestial_north, sightline)
-    east = normalize(east)
-    north = normalize(np.cross(sightline, east))
-    return east, north, sightline
-
-
-def tangent_screen(
-    unit_vectors: np.ndarray,
-    basis: tuple[np.ndarray, np.ndarray, np.ndarray],
-) -> np.ndarray:
-    east, north, sightline = basis
-    denominator = unit_vectors @ sightline
-    if np.any(denominator <= 0.0):
-        raise ValueError("A direction lies outside the tangent hemisphere.")
-    return np.column_stack(
-        ((unit_vectors @ east) / denominator, (unit_vectors @ north) / denominator)
-    )
-
-
-def signed_line_angle_deg(direction: np.ndarray) -> float:
-    angle = float(np.degrees(np.arctan2(direction[1], direction[0])))
-    while angle > 90.0:
-        angle -= 180.0
-    while angle <= -90.0:
-        angle += 180.0
-    return angle
-
-
-def orthogonal_fit(points: np.ndarray) -> dict[str, object]:
-    centroid = np.mean(points, axis=0)
-    _, _, vh = np.linalg.svd(points - centroid, full_matrices=False)
-    direction = vh[0]
-    if np.dot(direction, points[-1] - points[0]) < 0.0:
-        direction = -direction
-    normal = np.array([-direction[1], direction[0]])
-    residual = (points - centroid) @ normal
-    return {
-        "centroid": centroid,
-        "direction": direction,
-        "normal": normal,
-        "angle_deg": signed_line_angle_deg(direction),
-        "rms_arcsec": float(np.sqrt(np.mean(residual**2))),
-    }
-
-
-def evaluate_frame(
-    name: str,
-    projector,
-    sun_directions: np.ndarray,
-    venus_directions: np.ndarray,
-    fit_mask: np.ndarray,
-    local_sun: np.ndarray,
-    local_venus: np.ndarray,
-) -> dict[str, object]:
-    relative = (
-        projector(venus_directions) - projector(sun_directions)
-    ) * ARCSEC_PER_RAD
-    fit = orthogonal_fit(relative[fit_mask])
-    local_relative = (
-        projector(local_venus) - projector(local_sun)
-    ) * ARCSEC_PER_RAD
-    instantaneous_direction = normalize(local_relative[1] - local_relative[0])
-    ca_position = 0.5 * (local_relative[0] + local_relative[1])
-    return {
-        "name": name,
-        "relative_arcsec": relative,
-        "ca_position_arcsec": ca_position,
-        "instantaneous_angle_deg": signed_line_angle_deg(instantaneous_direction),
-        "fit_angle_deg": float(fit["angle_deg"]),
-        "rms_arcsec": float(fit["rms_arcsec"]),
-        "fit": fit,
-    }
-
-
-def derive_north_pole_frames(
-    tables: dict[str, dict[str, np.ndarray]],
-) -> dict[str, object]:
-    sun_table = tables["Sun"]
-    venus_table = tables["Venus"]
-    closest = refine_closest_approach(sun_table, venus_table)
-
-    epochs = sun_table["jd_ut"]
-    epoch_seconds = (epochs - float(closest["jd0"])) * SECONDS_PER_DAY
-    fit_mask = np.abs(
-        epoch_seconds - float(closest["ca_seconds"])
-    ) <= FIT_HALF_WINDOW_HOURS * 3600.0
-
-    sun_directions = normalize_rows(sun_table["position_km"])
-    venus_directions = normalize_rows(venus_table["position_km"])
-
-    derivative_step = 30.0
-    sample_seconds = np.array(
+def screen_point(cache, site, jd, basis):
+    n, xhat, yhat = basis
+    osun = vec(cache, f"{site.key}S", jd)
+    ovenus = vec(cache, f"{site.key}V", jd)
+    scale = float(np.dot(osun, n)) / float(np.dot(ovenus, n))
+    qvec = scale * ovenus - osun
+    es = np.linalg.norm(vec(cache, "GS", jd))
+    return np.array(
         [
-            float(closest["ca_seconds"]) - derivative_step,
-            float(closest["ca_seconds"]) + derivative_step,
-        ]
+            np.arctan2(np.dot(qvec, xhat), es) * ASEC,
+            np.arctan2(np.dot(qvec, yhat), es) * ASEC,
+        ],
+        float,
     )
-    local_sun = normalize_rows(closest["sun_spline"](sample_seconds))
-    local_venus = normalize_rows(closest["venus_spline"](sample_seconds))
 
-    ca_sun_direction = normalize(
-        closest["sun_spline"](float(closest["ca_seconds"]))
-    )
-    tangent_basis = ca_tangent_basis(ca_sun_direction)
 
-    frames = [
-        evaluate_frame(
-            "Fixed +X ray screen (Y/X,Z/X)",
-            fixed_x_ray_screen,
-            sun_directions,
-            venus_directions,
-            fit_mask,
-            local_sun,
-            local_venus,
-        ),
-        evaluate_frame(
-            "Fixed ICRF Y-Z components",
-            fixed_yz_component_screen,
-            sun_directions,
-            venus_directions,
-            fit_mask,
-            local_sun,
-            local_venus,
-        ),
-        evaluate_frame(
-            "CA tangent plane (east,north)",
-            lambda directions: tangent_screen(directions, tangent_basis),
-            sun_directions,
-            venus_directions,
-            fit_mask,
-            local_sun,
-            local_venus,
-        ),
+def pca(points):
+    center = np.mean(points, axis=0)
+    _, _, vh = np.linalg.svd(points - center, full_matrices=False)
+    direction = vh[0]
+    if direction[0] < 0.0:
+        direction = -direction
+    direction = unit(direction)
+    angle = float(np.degrees(np.arctan2(direction[1], direction[0])))
+    return center, direction, angle
+
+
+def track_geometry(cache, event_times, ca_jd):
+    basis = screen_basis(cache, ca_jd)
+    all_contacts = [
+        t for site_events in event_times.values() for t in site_events.values()
     ]
+    jd = cache["jd"]
+    fit_jd = jd[(jd >= min(all_contacts)) & (jd <= max(all_contacts))]
 
+    tracks, directions, angles = {}, {}, {}
+    for site in SITES:
+        points = np.array([screen_point(cache, site, t, basis) for t in fit_jd])
+        _, direction, angle = pca(points)
+        tracks[site.key] = points
+        directions[site.key] = direction
+        angles[site.key] = angle
+
+    common = unit(directions[NP.key] + directions[SP.key])
+    if common[0] < 0.0:
+        common = -common
+    common_angle = float(np.degrees(np.arctan2(common[1], common[0])))
     return {
-        "jd_ut": epochs,
-        "fit_mask": fit_mask,
-        "frames": frames,
-        **closest,
+        "tracks": tracks,
+        "angles": angles,
+        "common_angle": common_angle,
+        "fit_rows": len(fit_jd),
     }
 
 
-def jd_to_utc_text(jd_ut: float) -> str:
+def utc_text(jd):
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    moment = epoch + timedelta(seconds=(jd_ut - 2440587.5) * SECONDS_PER_DAY)
-    return moment.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    dt = epoch + timedelta(seconds=(jd - 2440587.5) * DAY)
+    return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
-def display_results(
-    tables: dict[str, dict[str, np.ndarray]],
-    result: dict[str, object],
-) -> None:
-    epochs = tables["Sun"]["jd_ut"]
-    cadence = np.median(np.diff(epochs)) * SECONDS_PER_DAY
-
-    print("IERS TN36 - North Pole Track-Angle Sanity Check")
+def display(event_times, ca_jd, ca_sep, geometry):
+    print("IERS TN36 - Restored Common Solar-Screen Sanity Check")
     print(f"Version : {VERSION}")
-    print(
-        "Observer: "
-        f"longitude={NORTH_POLE.longitude_deg:.6f} deg, "
-        f"latitude={NORTH_POLE.latitude_deg:.6f} deg, "
-        f"elevation={NORTH_POLE.elevation_km:.6f} km"
-    )
-    print(
-        f"Vectors : {epochs.size:d} synchronized Sun/Venus rows, "
-        f"{cadence:.6f} s cadence"
-    )
+    print("Method  : physical Venus-ray intersection with fixed geocentric solar screen")
 
-    print("\nCLOSEST APPROACH")
-    print("UTC                         JD UT                 SEPARATION arcsec")
-    print(
-        f"{jd_to_utc_text(float(result['ca_jd_ut'])):<27} "
-        f"{float(result['ca_jd_ut']):19.10f} "
-        f"{float(result['ca_separation_arcsec']):18.6f}"
-    )
-
-    print("\nNORTH POLE 2012 TRACK-ANGLE FRAME CHECK")
-    print(
-        "FRAME                              "
-        "X CA arcsec    Y CA arcsec    "
-        "INSTANT deg      FIT deg      RMS arcsec"
-    )
-    for frame in result["frames"]:
-        ca = frame["ca_position_arcsec"]
+    print("\nCONTACT TIMES UTC")
+    print("SITE          C1                      C2                      C3                      C4")
+    for site in SITES:
+        e = event_times[site.key]
         print(
-            f"{frame['name']:<34} "
-            f"{ca[0]:12.6f}  {ca[1]:12.6f}  "
-            f"{frame['instantaneous_angle_deg']:11.6f}  "
-            f"{frame['fit_angle_deg']:11.6f}  "
-            f"{frame['rms_arcsec']:12.6f}"
+            f"{site.label:<13}"
+            f"{utc_text(e['C1']):<24}"
+            f"{utc_text(e['C2']):<24}"
+            f"{utc_text(e['C3']):<24}"
+            f"{utc_text(e['C4']):<24}"
         )
 
+    print("\nGEOCENTRIC CLOSEST APPROACH")
+    print("UTC                         JD UT                 SEPARATION arcsec")
+    print(f"{utc_text(ca_jd):<27}{ca_jd:19.10f}{ca_sep:18.6f}")
 
-def plot_fixed_x_screen(result: dict[str, object]) -> None:
-    frame = result["frames"][0]
-    points = frame["relative_arcsec"]
-    mask = result["fit_mask"]
-    fit = frame["fit"]
-    fitted_points = points[mask]
-    along = (fitted_points - fit["centroid"]) @ fit["direction"]
-    endpoints = fit["centroid"] + np.array(
-        [along.min(), along.max()]
-    )[:, None] * fit["direction"]
+    print("\nRESTORED C1-C4 PCA TRACK ANGLES")
+    print("TRACK                 ANGLE deg")
+    print(f"{'North Pole':<22}{geometry['angles'][NP.key]:12.6f}")
+    print(f"{'South Pole':<22}{geometry['angles'][SP.key]:12.6f}")
+    print(f"{'Common tangent':<22}{geometry['common_angle']:12.6f}")
+    print(f"{'Fit rows':<22}{geometry['fit_rows']:12d}")
 
-    fig, axis = plt.subplots(figsize=(8.0, 6.0))
-    axis.plot(points[:, 0], points[:, 1], linewidth=1.1, label="North Pole track")
-    axis.plot(
-        endpoints[:, 0],
-        endpoints[:, 1],
-        "--",
-        linewidth=1.0,
-        label="Orthogonal fit ±3.25 h",
-    )
-    axis.scatter([0.0], [0.0], marker="+", s=32, label="Sun center")
-    ca = frame["ca_position_arcsec"]
-    axis.scatter([ca[0]], [ca[1]], s=34, label="Closest approach")
-    axis.set_aspect("equal", adjustable="datalim")
-    axis.set_xlabel("Fixed +X screen Y/X offset (arcsec)")
-    axis.set_ylabel("Fixed +X screen Z/X offset (arcsec)")
-    axis.set_title(
-        "North Pole — 2012 Venus Transit\n"
-        f"Fixed +X fitted track angle {frame['fit_angle_deg']:.6f}°"
-    )
-    axis.grid(True, linewidth=0.5, alpha=0.35)
-    axis.legend()
+
+def plot_tracks(geometry):
+    fig, ax = plt.subplots(figsize=(8.5, 6.0))
+    for site in SITES:
+        points = geometry["tracks"][site.key]
+        ax.plot(
+            points[:, 0],
+            points[:, 1],
+            linewidth=1.1,
+            label=f"{site.label} {geometry['angles'][site.key]:.6f}°",
+        )
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.set_xlabel("Common solar-screen X (arcsec)")
+    ax.set_ylabel("Common solar-screen Y (arcsec)")
+    ax.set_title("2012 Venus Transit — Restored Solar-Screen Geometry")
+    ax.grid(True, linewidth=0.5, alpha=0.35)
+    ax.legend()
+    fig.tight_layout()
     plt.show()
 
 
-def main() -> None:
-    tables = fetch_north_pole_vectors()
-    result = derive_north_pole_frames(tables)
-    display_results(tables, result)
-    plot_fixed_x_screen(result)
+def main():
+    data = fetch_all()
+    cache = build_cache(data)
+    event_times = contacts(cache)
+    ca_jd, ca_sep = geocentric_ca(cache)
+    geometry = track_geometry(cache, event_times, ca_jd)
+    display(event_times, ca_jd, ca_sep, geometry)
+    plot_tracks(geometry)
 
 
 if __name__ == "__main__":
