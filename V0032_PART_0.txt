@@ -1,0 +1,159 @@
+# V0032
+# Audit reference: Fresh JPL Horizons reconstruction of the 1769 Mercury transit from Vardo, Norway and Mercury Bay, New Zealand, including a geometry-derived solar-parallax audit.
+from __future__ import annotations
+
+import math
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+VERSION = "V0032"
+LOCAL_TZ = ZoneInfo("America/Bogota")
+ARCSEC_PER_RAD = 206_264.80624709636
+JPL_AU_KM = 149_597_870.7
+C_KM_S = 299_792.458
+TAU_A_S = 499.004782
+IAU1976_AU_KM = C_KM_S * TAU_A_S
+EARTH_RADIUS_KM = 6_378.140
+SUN_RADIUS_KM = 695_700.0
+MERCURY_RADIUS_KM = 2_439.7
+START = "1769-Nov-09 17:00"
+STOP = "1769-Nov-10 02:00"
+STEP = "1m"
+EVENTS = ("C1", "C2", "CA", "C3", "C4")
+
+VARDO = {
+    "key": "VARDO",
+    "label": "Vardo, Norway",
+    "short": "Vardo",
+    "lon": 31.1107,
+    "lat": 70.3706,
+    "elev_km": 0.0,
+    "color": "#ffc861",
+}
+MERCURY_BAY = {
+    "key": "MERCURY_BAY",
+    "label": "Mercury Bay, New Zealand",
+    "short": "Mercury Bay",
+    "lon": 175.933333,
+    "lat": -36.783333,
+    "elev_km": 0.0,
+    "color": "#5ee08a",
+}
+SITES = (VARDO, MERCURY_BAY)
+OUTPUT_DIR = Path("/content/IERS_TN36_V01_MASTER_OUTPUT/V0032_MERCURY_VARDO_MERCURY_BAY")
+PNG = OUTPUT_DIR / "V0032_MERCURY_VARDO_MERCURY_BAY_HALF_SUN.png"
+CSV = OUTPUT_DIR / "V0032_MERCURY_VARDO_MERCURY_BAY_EVENTS.csv"
+
+
+def ensure_package(import_name: str, pip_name: str) -> None:
+    try:
+        __import__(import_name)
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "-q", "install", pip_name])
+
+
+for _name, _pip in (
+    ("numpy", "numpy"),
+    ("pandas", "pandas"),
+    ("scipy", "scipy"),
+    ("matplotlib", "matplotlib"),
+    ("astroquery", "astroquery"),
+    ("astropy", "astropy"),
+):
+    ensure_package(_name, _pip)
+
+import astropy.units as u
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from astroquery.jplhorizons import Horizons
+from astropy.time import Time
+from IPython.display import Image, display
+from matplotlib.patches import Circle
+from scipy.interpolate import CubicSpline
+from scipy.optimize import brentq, minimize_scalar
+
+
+def norm(vector: np.ndarray) -> float:
+    return float(np.linalg.norm(vector))
+
+
+def unit(vector: np.ndarray) -> np.ndarray:
+    magnitude = norm(vector)
+    if magnitude == 0.0:
+        raise RuntimeError("Zero-length vector.")
+    return np.asarray(vector, dtype=float) / magnitude
+
+
+def site_location(site: dict[str, object]) -> dict[str, u.Quantity]:
+    return {
+        "lon": float(site["lon"]) * u.deg,
+        "lat": float(site["lat"]) * u.deg,
+        "elevation": float(site["elev_km"]) * u.km,
+    }
+
+
+def get_vectors(target: str, location: object, prefix: str) -> pd.DataFrame:
+    query = Horizons(
+        id=target,
+        location=location,
+        epochs={"start": START, "stop": STOP, "step": STEP},
+    )
+    vectors = query.vectors().to_pandas()
+    return pd.DataFrame(
+        {
+            "jd": vectors["datetime_jd"].astype(float),
+            f"{prefix}_x": vectors["x"].astype(float) * JPL_AU_KM,
+            f"{prefix}_y": vectors["y"].astype(float) * JPL_AU_KM,
+            f"{prefix}_z": vectors["z"].astype(float) * JPL_AU_KM,
+        }
+    )
+
+
+def merge_vectors() -> tuple[pd.DataFrame, pd.DataFrame]:
+    geocenter_sun = get_vectors("10", "500@399", "GEO_SUN")
+    geocenter_mercury = get_vectors("199", "500@399", "GEO_MERCURY")
+    geocenter = geocenter_sun.merge(geocenter_mercury, on="jd", how="inner")
+
+    topocentric: pd.DataFrame | None = None
+    for site in SITES:
+        location = site_location(site)
+        for target, suffix in (("10", "SUN"), ("199", "MERCURY")):
+            frame = get_vectors(target, location, f"{site['key']}_{suffix}")
+            topocentric = frame if topocentric is None else topocentric.merge(frame, on="jd", how="inner")
+
+    if topocentric is None or len(geocenter) < 500 or len(topocentric) < 500:
+        raise RuntimeError("Incomplete JPL vector retrieval.")
+    return geocenter, topocentric
+
+
+def build_cache(frame: pd.DataFrame) -> dict[str, object]:
+    jd = frame["jd"].to_numpy(dtype=float)
+    result: dict[str, object] = {"jd": jd}
+    for column in frame.columns:
+        if column != "jd":
+            result[column] = CubicSpline(jd, frame[column].to_numpy(dtype=float), bc_type="natural")
+    return result
+
+
+def vector_at(data: dict[str, object], prefix: str, jd: float) -> np.ndarray:
+    return np.array(
+        [
+            float(data[f"{prefix}_x"](jd)),
+            float(data[f"{prefix}_y"](jd)),
+            float(data[f"{prefix}_z"](jd)),
+        ],
+        dtype=float,
+    )
+
+
+def site_vector(data: dict[str, object], site: dict[str, object], body: str, jd: float) -> np.ndarray:
+    return vector_at(data, f"{site['key']}_{body}", jd)
+
+
+def angular_separation_arcsec(a: np.ndarray, b: np.ndarray) -> float:
+    cosine = float(np.clip(np.dot(unit(a), unit(b)), -1.0, 1.0))
+    return math.acos(cosine) * ARCSEC_PER_RAD
