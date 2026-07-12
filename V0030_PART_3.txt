@@ -1,0 +1,155 @@
+    event_points = {name: screen_point(geo, topo, site, value, basis) for name, value in events.items()}
+    event_radii = {name: normalized_venus_radius(geo, topo, site, value) for name, value in events.items()}
+    return {
+        "site": site,
+        "jd": all_jd,
+        "points": points,
+        "events": events,
+        "event_points": event_points,
+        "event_radii": event_radii,
+    }
+
+
+def track_fit(track: dict[str, object]) -> tuple[np.ndarray, np.ndarray, float, float, float]:
+    points = np.asarray(track["points"], dtype=float)
+    center = points.mean(axis=0)
+    centered = points - center
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    direction = unit(vt[0])
+    if direction[0] < 0.0:
+        direction = -direction
+    normal = np.array([-direction[1], direction[0]], dtype=float)
+    residuals = centered @ normal
+    rms = float(np.sqrt(np.mean(residuals**2)))
+    slope = float(direction[1] / direction[0])
+    angle = math.degrees(math.atan2(direction[1], direction[0]))
+    return center, direction, angle, slope, rms
+
+
+def line_intersection(mu: np.ndarray, direction: np.ndarray, midpoint: np.ndarray, normal: np.ndarray) -> np.ndarray:
+    solution, *_ = np.linalg.lstsq(np.column_stack((direction, -normal)), midpoint - mu, rcond=None)
+    return mu + float(solution[0]) * direction
+
+
+def compute_summary(
+    geo: dict[str, object],
+    north: dict[str, object],
+    south: dict[str, object],
+    reference_jd: float,
+) -> dict[str, float]:
+    mu_n, direction_n, beta_n, slope_n, rms_n = track_fit(north)
+    mu_s, direction_s, beta_s, slope_s, rms_s = track_fit(south)
+    tangent = unit(direction_n + direction_s)
+    if tangent[0] < 0.0:
+        tangent = -tangent
+    normal = np.array([-tangent[1], tangent[0]], dtype=float)
+    midpoint = 0.5 * (mu_n + mu_s)
+    aprime = line_intersection(mu_n, direction_n, midpoint, normal)
+    bprime = line_intersection(mu_s, direction_s, midpoint, normal)
+    chord = bprime - aprime
+    abp_arcsec = float(np.linalg.norm(chord))
+    rho_arcsec = abs(float(np.dot(chord, normal)))
+
+    earth_sun = vector_at(geo, "GEO_SUN", reference_jd)
+    earth_venus = vector_at(geo, "GEO_VENUS", reference_jd)
+    venus_sun = earth_venus - earth_sun
+    ev_over_vs = norm(earth_venus) / norm(venus_sun)
+
+    theta = abp_arcsec / ARCSEC_PER_RAD
+    abp_km = math.tan(theta) * IAU1976_AU_KM
+    ab_km = abp_km * ev_over_vs
+    ab_arcsec = math.atan2(ab_km, IAU1976_AU_KM) * ARCSEC_PER_RAD
+    raw_phi = rho_arcsec * ev_over_vs * EARTH_RADIUS_KM / ab_km
+    pi_sun = (
+        raw_phi
+        * (abp_arcsec / rho_arcsec)
+        * (math.tan(theta) / theta)
+        * (math.asin(EARTH_RADIUS_KM / IAU1976_AU_KM) / (EARTH_RADIUS_KM / IAU1976_AU_KM))
+    )
+    return {
+        "beta_north": beta_n,
+        "beta_south": beta_s,
+        "delta_beta": abs(beta_n - beta_s),
+        "average_beta": 0.5 * (beta_n + beta_s),
+        "slope_north": slope_n,
+        "slope_south": slope_s,
+        "rms_north": rms_n,
+        "rms_south": rms_s,
+        "pi_sun": pi_sun,
+        "halley_ratio": abp_km / ab_km,
+        "abp_arcsec": abp_arcsec,
+        "abp_km": abp_km,
+        "ab_arcsec": ab_arcsec,
+        "ab_km": ab_km,
+        "des_au": 1.0,
+    }
+
+
+def summary_table(axes, summary: dict[str, float]) -> None:
+    rows = [
+        ("β North Pole", f"{summary['beta_north']:.6f}", "deg"),
+        ("β South Pole", f"{summary['beta_south']:.6f}", "deg"),
+        ("Δβ", f"{summary['delta_beta']:.6f}", "deg"),
+        ("π⊙", f"{summary['pi_sun']:.10f}", "arcsec"),
+        ("A′B′ / AB", f"{summary['halley_ratio']:.10f}", "ratio"),
+        ("A′B′", f"{summary['abp_arcsec']:.6f}", "arcsec"),
+        ("A′B′", f"{summary['abp_km']:.6f}", "km"),
+        ("AB", f"{summary['ab_arcsec']:.6f}", "arcsec"),
+        ("AB", f"{summary['ab_km']:.6f}", "km"),
+        ("D ES", f"{summary['des_au']:.12f}", "AU"),
+    ]
+    table = axes.table(
+        cellText=rows,
+        colLabels=["Quantity", "Value", "Unit"],
+        loc="lower left",
+        colWidths=[0.29, 0.23, 0.15],
+        bbox=[0.438, 0.122, 0.380, 0.345],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(5.30)
+    for (row, column), cell in table.get_celld().items():
+        cell.set_linewidth(0.18)
+        cell.set_edgecolor("#1e4f64")
+        cell.set_facecolor("#0a1a22" if row == 0 else "#050b0f")
+        cell.get_text().set_color(
+            "#66e8ff"
+            if row == 0
+            else ("#ffc861" if column == 1 else ("#5ee08a" if column == 2 else "#dff8ff"))
+        )
+        if row == 0 or column == 1:
+            cell.get_text().set_fontweight("bold")
+    axes.text(
+        0.440,
+        0.101,
+        "A′B′ = solar-screen chord; AB = projected pole-to-pole baseline; D ES = IAU 1976 cτA.",
+        transform=axes.transAxes,
+        color="#8fb4c1",
+        fontsize=5.25,
+        ha="left",
+        va="top",
+    )
+
+
+def label_event(axes, point: np.ndarray, text: str, color: str, dx: float, dy: float) -> None:
+    axes.annotate(
+        text,
+        xy=point,
+        xytext=(point[0] + dx, point[1] + dy),
+        textcoords="data",
+        fontsize=5.5,
+        color=color,
+        arrowprops=dict(arrowstyle="-", lw=0.20, color=color),
+    )
+
+
+def make_plot(north: dict[str, object], south: dict[str, object], summary: dict[str, float]) -> None:
+    solar_radius_arcsec = math.atan2(SUN_RADIUS_KM, IAU1976_AU_KM) * ARCSEC_PER_RAD
+    figure, axes = plt.subplots(figsize=(9.6, 5.8), dpi=240)
+    figure.patch.set_facecolor("#03080d")
+    axes.set_facecolor("#03080d")
+
+    solar_limb = Circle((0.0, 0.0), solar_radius_arcsec, fill=False, lw=0.36, ec="#66e8ff", alpha=0.95)
+    axes.add_patch(solar_limb)
+    axes.axhline(0.0, lw=0.18, color="#1d3d4a")
+    axes.axvline(0.0, lw=0.18, color="#1d3d4a")
+
