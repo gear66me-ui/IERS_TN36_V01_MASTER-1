@@ -1,0 +1,156 @@
+    plotted_events = 0
+    for track in (north, south):
+        site = track["site"]
+        color = str(site["color"])
+        points = np.asarray(track["points"], dtype=float)
+        axes.plot(points[:, 0], points[:, 1], lw=0.30, color=color, label=str(site["label"]), zorder=3)
+        axes.scatter(points[::6, 0], points[::6, 1], s=0.8, color=color, linewidths=0, zorder=4)
+
+        for event in EVENTS:
+            point = np.asarray(track["event_points"][event], dtype=float)
+            radius = float(track["event_radii"][event])
+            axes.add_patch(
+                Circle(
+                    (point[0], point[1]),
+                    radius,
+                    fill=False,
+                    lw=0.28 if event == "CA" else 0.20,
+                    ec=color,
+                    alpha=0.95,
+                    zorder=5,
+                )
+            )
+            axes.scatter([point[0]], [point[1]], s=3.5, color=color, linewidths=0, zorder=6)
+            plotted_events += 1
+
+        if site["key"] == "NORTH_POLE":
+            label_event(axes, track["event_points"]["C1"], "N C1", color, 18, 46)
+            label_event(axes, track["event_points"]["C2"], "N C2", color, -72, 36)
+            label_event(axes, track["event_points"]["CA"], "North Pole", color, 18, 54)
+            label_event(axes, track["event_points"]["C3"], "N C3", color, 24, 40)
+            label_event(axes, track["event_points"]["C4"], "N C4", color, -64, 48)
+        else:
+            label_event(axes, track["event_points"]["C1"], "S C1", color, 18, -46)
+            label_event(axes, track["event_points"]["C2"], "S C2", color, -72, -36)
+            label_event(axes, track["event_points"]["CA"], "South Pole", color, 18, -54)
+            label_event(axes, track["event_points"]["C3"], "S C3", color, 24, -38)
+            label_event(axes, track["event_points"]["C4"], "S C4", color, -64, -48)
+
+    if plotted_events != 10:
+        raise RuntimeError(f"Expected 10 plotted event disks; found {plotted_events}.")
+
+    summary_table(axes, summary)
+    combined = np.vstack((north["points"], south["points"]))
+    median_y = float(np.median(combined[:, 1]))
+    axes.set_xlim(-1.04 * solar_radius_arcsec, 1.04 * solar_radius_arcsec)
+    axes.set_ylim(
+        (-0.06 * solar_radius_arcsec, 1.06 * solar_radius_arcsec)
+        if median_y >= 0.0
+        else (-1.06 * solar_radius_arcsec, 0.06 * solar_radius_arcsec)
+    )
+    axes.set_aspect("equal", adjustable="box")
+    axes.grid(True, color="#102630", linewidth=0.16, alpha=0.55)
+    axes.tick_params(colors="#8fb4c1", labelsize=6.5, width=0.22, length=2)
+    axes.set_xlabel("IAU-1976-normalized solar-screen X offset (arcsec)", color="#8fb4c1", fontsize=7.5)
+    axes.set_ylabel("IAU-1976-normalized solar-screen Y offset (arcsec)", color="#8fb4c1", fontsize=7.5)
+    axes.set_title(
+        "1769 Venus Transit — Engineering Half-Sun Track Reconstruction\n"
+        "North Pole / South Pole — JPL Horizons SITE_COORD geometry",
+        color="#f8fdff",
+        fontsize=9,
+        pad=8,
+    )
+    legend = axes.legend(loc="lower right", fontsize=6.3, frameon=True)
+    legend.get_frame().set_facecolor("#071016")
+    legend.get_frame().set_edgecolor("#1e4f64")
+    for item in legend.get_texts():
+        item.set_color("#dff8ff")
+
+    figure.text(
+        0.5,
+        0.016,
+        "Venus disks are plotted to scale at C1, C2, closest approach, C3, and C4. North labels above; South labels below.",
+        ha="center",
+        fontsize=6.2,
+        color="#8fb4c1",
+    )
+    figure.savefig(PNG, dpi=460, facecolor=figure.get_facecolor(), bbox_inches="tight", pad_inches=0.055)
+    plt.show()
+    plt.close(figure)
+    if not PNG.is_file() or PNG.stat().st_size == 0:
+        raise RuntimeError("PNG plot was not generated.")
+    display(Image(filename=str(PNG)))
+
+
+def utc(jd: float) -> str:
+    return Time(jd, format="jd", scale="tdb").utc.iso
+
+
+def write_csv(tracks: tuple[dict[str, object], dict[str, object]], summary: dict[str, float]) -> None:
+    records: list[dict[str, object]] = []
+    for track in tracks:
+        site = track["site"]
+        for event in EVENTS:
+            point = np.asarray(track["event_points"][event], dtype=float)
+            records.append(
+                {
+                    "site": site["label"],
+                    "event": event,
+                    "jd_tdb": track["events"][event],
+                    "utc": utc(track["events"][event]),
+                    "x_arcsec": point[0],
+                    "y_arcsec": point[1],
+                    "venus_radius_arcsec": track["event_radii"][event],
+                    "pi_sun_arcsec": summary["pi_sun"],
+                }
+            )
+    pd.DataFrame(records).to_csv(CSV, index=False, float_format="%.12f")
+
+
+def main() -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    geocenter_frame, topocentric_frame = merge_vectors()
+    geo = build_cache(geocenter_frame)
+    topo = build_cache(topocentric_frame)
+
+    events_north = compute_events(topo, NORTH_POLE)
+    events_south = compute_events(topo, SOUTH_POLE)
+    reference_jd = 0.5 * (events_north["CA"] + events_south["CA"])
+    basis = screen_basis(geo, reference_jd)
+
+    track_north = build_track(geo, topo, NORTH_POLE, events_north, basis)
+    track_south = build_track(geo, topo, SOUTH_POLE, events_south, basis)
+    summary = compute_summary(geo, track_north, track_south, reference_jd)
+    write_csv((track_north, track_south), summary)
+    make_plot(track_north, track_south, summary)
+
+    print("CODE INPUTS")
+    print(f"Fresh JPL Horizons vectors | {START} to {STOP} | {STEP}")
+    print("COMMENTS")
+    print("Exact North Pole and South Pole SITE_COORD observers; IAU 1976 cτA normalization.")
+    print("RESULTS")
+    for site, events in ((NORTH_POLE, events_north), (SOUTH_POLE, events_south)):
+        print(str(site["label"]) + " | " + " | ".join(f"{event} {utc(events[event])}" for event in EVENTS))
+    print(f"π⊙ | {summary['pi_sun']:.10f} arcsec")
+    print(f"β North Pole | {summary['beta_north']:.6f} deg")
+    print(f"β South Pole | {summary['beta_south']:.6f} deg")
+    print(f"Average β | {summary['average_beta']:.6f} deg")
+    print(f"Slope North Pole | {summary['slope_north']:.9f}")
+    print(f"Slope South Pole | {summary['slope_south']:.9f}")
+    print(f"RMS North Pole | {summary['rms_north']:.9f} arcsec")
+    print(f"RMS South Pole | {summary['rms_south']:.9f} arcsec")
+    print("OUTPUT SUMMARY")
+    print(f"PNG | {PNG}")
+    print(f"CSV | {CSV}")
+    print("PAPER COMPARISON")
+    print(f"IAU 1976 Earth radius | {EARTH_RADIUS_KM:.6f} km")
+    print(f"IAU 1976 cτA distance | {IAU1976_AU_KM:.6f} km")
+    print("EQUATION STATUS")
+    print("Contacts, closest approaches, screen projection, fits, and table quantities derived from JPL vectors.")
+    print(datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %Z"))
+    print(f"# {VERSION}")
+
+
+if __name__ == "__main__":
+    main()
+# V0030
