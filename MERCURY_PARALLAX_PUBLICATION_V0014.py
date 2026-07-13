@@ -1,186 +1,26 @@
 # V0014
-# Audit reference: Patch verified V0013 JPL source for stronger lines, yellow solar limb, and the A/B/A-prime/B-prime track table.
+# Audit reference: Self-contained GitHub delivery for the swapped-zoom A/B derivation V0014 publication program.
 from __future__ import annotations
 
-import ast
 import base64
 import gzip
 import hashlib
-import re
-import urllib.request
 from pathlib import Path
 
-SOURCE_URL = (
-    "https://raw.githubusercontent.com/gear66me-ui/"
-    "IERS_TN36_V01_MASTER-1/"
-    "27c4cdf9f216478698f1fa90c8a5ce22aeebef71/"
-    "MERCURY_PARALLAX_PUBLICATION_V0013.py"
-)
-OUTPUT_PATH = Path("/content/MERCURY_PARALLAX_PUBLICATION_V0014_FULL.py")
+PAYLOAD = "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"
+EXPECTED_SHA256 = "f6649c097adef98696b2e88d4a52158f4af6b7a0adc4a7d5102e06d5ecc13957"
+EXPANDED_PATH = Path("/content/MERCURY_PARALLAX_PUBLICATION_V0014_FULL.py")
 
-
-def extract_literal(module_text: str, variable_name: str):
-    tree = ast.parse(module_text)
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == variable_name:
-                    return ast.literal_eval(node.value)
-    raise RuntimeError(f"{variable_name} was not found in the immutable V0013 wrapper.")
-
-
-request = urllib.request.Request(
-    SOURCE_URL,
-    headers={
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "User-Agent": "Colab-V0014",
-    },
-)
-wrapper_bytes = urllib.request.urlopen(request, timeout=90).read()
-wrapper_text = wrapper_bytes.decode("utf-8")
-payload = extract_literal(wrapper_text, "PAYLOAD")
-expected_sha256 = extract_literal(wrapper_text, "EXPECTED_SHA256")
-
-source_bytes = gzip.decompress(base64.b64decode(payload))
-source_digest = hashlib.sha256(source_bytes).hexdigest()
-if source_digest != expected_sha256:
-    raise RuntimeError(
-        "Immutable V0013 source verification failed: "
-        f"expected {expected_sha256}, received {source_digest}"
-    )
-
-text = source_bytes.decode("utf-8")
-if not text.startswith("# V0013\n") or not text.rstrip().endswith("# V0013"):
-    raise RuntimeError("V0013 source boundary audit failed.")
-
-text = text.replace("V0013", "V0014")
-
-text, sun_color_count = re.subn(
-    r'(?m)^(\s*SUN_COLOR\s*=\s*)["\'][^"\']+["\']\s*$',
-    r'\1"#FACC15"',
-    text,
-)
-text, sun_width_count = re.subn(
-    r'(?m)^(\s*(?:SUN|SOLAR|LIMB)[A-Z_]*LINE_WIDTH[A-Z_]*\s*=\s*)[0-9.]+\s*$',
-    r'\g<1>1.000',
-    text,
-)
-
-width_patterns = (
-    r'(?m)^(\s*TRACK[A-Z_]*LINE_WIDTH[A-Z_]*\s*=\s*)[0-9.]+\s*$',
-    r'(?m)^(\s*DISK[A-Z_]*LINE_WIDTH[A-Z_]*\s*=\s*)[0-9.]+\s*$',
-    r'(?m)^(\s*MERCURY[A-Z_]*LINE_WIDTH[A-Z_]*\s*=\s*)[0-9.]+\s*$',
-    r'(?m)^(\s*MARKER[A-Z_]*LINE_WIDTH[A-Z_]*\s*=\s*)[0-9.]+\s*$',
-)
-width_assignment_count = 0
-for pattern in width_patterns:
-    text, count = re.subn(pattern, r'\g<1>0.500', text)
-    width_assignment_count += count
-
-text = text.replace("linewidth=0.375", "linewidth=0.500")
-text = text.replace("linewidth = 0.375", "linewidth = 0.500")
-text = text.replace("linewidth=0.3750", "linewidth=0.500")
-text = text.replace("linewidth = 0.3750", "linewidth = 0.500")
-
-solar_plot_pattern = re.compile(
-    r'(ax_plot\.plot\(\s*'
-    r'reference_solar_radius\s*\*\s*np\.cos\(theta\)\s*,\s*'
-    r'reference_solar_radius\s*\*\s*np\.sin\(theta\)\s*\,)'
-    r'(.*?)'
-    r'(\n\s*\))',
-    re.DOTALL,
-)
-
-
-def patch_solar_plot(match: re.Match[str]) -> str:
-    body = match.group(2)
-    body = re.sub(r'color\s*=\s*[^,\n]+', 'color="#FACC15"', body, count=1)
-    body = re.sub(r'linewidth\s*=\s*[^,\n]+', 'linewidth=1.000', body, count=1)
-    return match.group(1) + body + match.group(3)
-
-
-text, solar_plot_count = solar_plot_pattern.subn(patch_solar_plot, text, count=1)
-
-table_block = r'''
-    # V0014 inset table: definitions and track angles, shifted upward by about two rows.
-    for _existing_plot_table in list(ax_plot.tables):
-        _existing_plot_table.set_visible(False)
-
-    _a_prime = np.asarray(
-        site_results["MERCURY_BAY"]["event_points"]["MAX"], dtype=float
-    )
-    _b_prime = np.asarray(
-        site_results["VARDO"]["event_points"]["MAX"], dtype=float
-    )
-    _angle_a = float(fit_mb["angle_deg"])
-    _angle_b = float(fit_v["angle_deg"])
-
-    _ab_rows = [
-        ["Point", "Definition", r"$\xi$ (arcsec)", r"$\eta$ (arcsec)", "Track angle"],
-        ["A", "Mercury Bay observer / cyan JPL track", "—", "—", f"{_angle_a:.6f}°"],
-        ["A′", "Mercury Bay closest-approach center", f"{_a_prime[0]:.6f}", f"{_a_prime[1]:.6f}", "—"],
-        ["B", "Vardø observer / amber virtual JPL track", "—", "—", f"{_angle_b:.6f}°"],
-        ["B′", "Vardø closest-approach center", f"{_b_prime[0]:.6f}", f"{_b_prime[1]:.6f}", "—"],
-        ["A/B mean", "Average fitted track angle", "—", "—", f"{average_angle:.6f}°"],
-    ]
-    _ab_table = ax_plot.table(
-        cellText=_ab_rows,
-        cellLoc="left",
-        colWidths=[0.10, 0.43, 0.17, 0.17, 0.18],
-        bbox=[0.075, 0.145, 0.850, 0.205],
-        zorder=20,
-    )
-    _ab_table.auto_set_font_size(False)
-    _ab_table.set_fontsize(6.8)
-    for (_row, _column), _cell in _ab_table.get_celld().items():
-        _cell.set_edgecolor("#CBD5E1")
-        _cell.set_linewidth(0.500)
-        _cell.get_text().set_color("white")
-        if _row == 0:
-            _cell.set_facecolor("#1E3A5F")
-            _cell.get_text().set_fontweight("bold")
-        elif _row in (1, 2):
-            _cell.set_facecolor("#123B48")
-        elif _row in (3, 4):
-            _cell.set_facecolor("#4A3510")
-        else:
-            _cell.set_facecolor("#0F172A")
-'''
-
-save_marker = "    figure.savefig("
-if save_marker not in text:
-    raise RuntimeError("V0013 figure-save marker was not found.")
-text = text.replace(save_marker, table_block + "\n" + save_marker, 1)
-
-comment_marker = '    print("COMMENTS")'
-comment_insert = (
-    '    print("COMMENTS")\n'
-    '    print("V0014 solar limb: yellow, 1.000-point line.")\n'
-    '    print("V0014 tracks, Mercury disks, centers, and inset-table borders: 0.500-point lines.")\n'
-    '    print("A and B identify the Mercury Bay and Vardø observer tracks; A′ and B′ are their closest-approach Mercury centers.")'
-)
-if comment_marker not in text:
-    raise RuntimeError("V0013 COMMENTS marker was not found.")
-text = text.replace(comment_marker, comment_insert, 1)
-
+source = gzip.decompress(base64.b64decode(PAYLOAD))
+actual = hashlib.sha256(source).hexdigest()
+if actual != EXPECTED_SHA256:
+    raise RuntimeError(f"V0014 SHA-256 mismatch: expected {EXPECTED_SHA256}, received {actual}")
+text = source.decode("utf-8")
 if not text.startswith("# V0014\n") or not text.rstrip().endswith("# V0014"):
-    raise RuntimeError("V0014 source boundary audit failed after promotion.")
-
-compile(text, str(OUTPUT_PATH), "exec")
-OUTPUT_PATH.write_text(text, encoding="utf-8")
-patched_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-print("Loader version: V0014")
-print(f"Verified immutable V0013 SHA-256: {source_digest}")
-print(f"Solar color assignment repairs: {sun_color_count}")
-print(f"Solar width assignment repairs: {sun_width_count}")
-print(f"Track/disk width assignment repairs: {width_assignment_count}")
-print(f"Solar plotting-call repairs: {solar_plot_count}")
-print(f"Patched complete V0014 SHA-256: {patched_sha256}")
-
-exec(
-    compile(text, str(OUTPUT_PATH), "exec"),
-    {"__name__": "__main__", "__file__": str(OUTPUT_PATH)},
-)
+    raise RuntimeError("V0014 source-boundary audit failed.")
+compile(text, str(EXPANDED_PATH), "exec")
+EXPANDED_PATH.write_text(text, encoding="utf-8")
+print(f"Expanded complete V0014 source: {EXPANDED_PATH}")
+print(f"Verified V0014 SHA-256: {actual}")
+exec(compile(text, str(EXPANDED_PATH), "exec"), {"__name__": "__main__", "__file__": str(EXPANDED_PATH)})
 # V0014
