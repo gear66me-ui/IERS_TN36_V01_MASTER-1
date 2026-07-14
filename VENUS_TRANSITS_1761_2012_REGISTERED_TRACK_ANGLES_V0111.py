@@ -49,6 +49,11 @@ class Fit:
     curvature: float
 
 
+def section(name: str) -> None:
+    print(name)
+    print("-" * len(name))
+
+
 def unit(a: np.ndarray) -> np.ndarray:
     n=float(np.linalg.norm(a))
     if not np.isfinite(n) or n<=0: raise ValueError("Zero or non-finite vector")
@@ -77,25 +82,31 @@ def ev(s: List[CubicSpline],t: float)->np.ndarray:
 
 def sep(e: np.ndarray,s: np.ndarray,v: np.ndarray)->np.ndarray:
     a,b=s-e,v-e
-    a/=np.linalg.norm(a,axis=1)[:,None]; b/=np.linalg.norm(b,axis=1)[:,None]
+    a/=np.linalg.norm(a,axis=1)[:,None]
+    b/=np.linalg.norm(b,axis=1)[:,None]
     return np.arccos(np.clip(np.einsum("ij,ij->i",a,b),-1,1))
 
 
 def closest(jd: np.ndarray,e: np.ndarray,s: np.ndarray,v: np.ndarray)->tuple[float,float]:
-    z=sep(e,s,v); i=int(np.argmin(z)); lo,hi=max(0,i-3),min(len(jd)-1,i+3)
+    z=sep(e,s,v)
+    i=int(np.argmin(z))
+    lo,hi=max(0,i-3),min(len(jd)-1,i+3)
     es,ss,vs=spl(jd,e),spl(jd,s),spl(jd,v)
-    def f(t: float)->float:
-        a=unit(ev(ss,t)-ev(es,t)); b=unit(ev(vs,t)-ev(es,t))
+    def objective(t: float)->float:
+        a=unit(ev(ss,t)-ev(es,t))
+        b=unit(ev(vs,t)-ev(es,t))
         return math.acos(float(np.clip(np.dot(a,b),-1,1)))
-    q=minimize_scalar(f,bounds=(float(jd[lo]),float(jd[hi])),method="bounded",options={"xatol":1e-12,"maxiter":300})
+    q=minimize_scalar(objective,bounds=(float(jd[lo]),float(jd[hi])),method="bounded",options={"xatol":1e-12,"maxiter":300})
     if not q.success: raise RuntimeError("REJECTED closest-approach refinement")
     return float(q.x),float(q.fun)
 
 
 def basis(e: np.ndarray,s: np.ndarray)->tuple[np.ndarray,np.ndarray]:
-    n=unit(s-e); x=np.cross(np.array([0.,0.,1.]),n)
+    n=unit(s-e)
+    x=np.cross(np.array([0.,0.,1.]),n)
     if np.linalg.norm(x)<1e-10: x=np.cross(np.array([0.,1.,0.]),n)
-    x=unit(x); y=unit(np.cross(n,x))
+    x=unit(x)
+    y=unit(np.cross(n,x))
     if abs(np.dot(x,y))>1e-12: raise RuntimeError("REJECTED tangent basis")
     return x,y
 
@@ -104,66 +115,137 @@ def fit(hours: np.ndarray,xy: np.ndarray)->Fit:
     cx,cy=np.polyfit(hours,xy[:,0],2),np.polyfit(hours,xy[:,1],2)
     model=np.column_stack((np.polyval(cx,hours),np.polyval(cy,hours)))
     rms=float(np.sqrt(np.mean(np.sum((xy-model)**2,axis=1))))
-    vx,vy,ax,ay=float(cx[1]),float(cy[1]),float(2*cx[0]),float(2*cy[0]); speed2=vx*vx+vy*vy
+    vx,vy,ax,ay=float(cx[1]),float(cy[1]),float(2*cx[0]),float(2*cy[0])
+    speed2=vx*vx+vy*vy
     if speed2<=0: raise RuntimeError("REJECTED degenerate fit")
-    return Fit(math.degrees(math.atan2(vy,vx))%360.0,math.inf if abs(vx)<1e-15 else vy/vx,rms,abs(vx*ay-vy*ax)/(speed2**1.5))
+    angle=math.degrees(math.atan2(vy,vx))%360.0
+    slope=math.inf if abs(vx)<1e-15 else vy/vx
+    curvature=abs(vx*ay-vy*ax)/(speed2**1.5)
+    return Fit(angle,slope,rms,curvature)
 
 
 def draw_sun(ax: plt.Axes)->None:
-    for p in [Circle((0,0),1,facecolor="#FFD900",edgecolor="none",alpha=.95),Circle((0,0),.985,facecolor="none",edgecolor="#FFD34D",linewidth=.5),Circle((0,0),1.012,facecolor="none",edgecolor="#FF8A00",linewidth=.8),Circle((0,0),1.024,facecolor="none",edgecolor="#FF2020",linewidth=1.45),Circle((0,0),1.036,facecolor="none",edgecolor="#FF4A1A",linewidth=.48)]: ax.add_patch(p)
+    rings=[
+        Circle((0,0),1,facecolor="#FFD900",edgecolor="none",alpha=.95),
+        Circle((0,0),.985,facecolor="none",edgecolor="#FFD34D",linewidth=.5),
+        Circle((0,0),1.012,facecolor="none",edgecolor="#FF8A00",linewidth=.8),
+        Circle((0,0),1.024,facecolor="none",edgecolor="#FF2020",linewidth=1.45),
+        Circle((0,0),1.036,facecolor="none",edgecolor="#FF4A1A",linewidth=.48),
+    ]
+    for ring in rings: ax.add_patch(ring)
 
 
 def make_plot(year:int,exy:np.ndarray,vxy:np.ndarray,ef:Fit,vf:Fit,opening:float,utc:str,path:Path)->None:
-    fig,ax=plt.subplots(figsize=(10.6,10),dpi=160); fig.patch.set_facecolor("black"); ax.set_facecolor("black"); draw_sun(ax)
+    fig,ax=plt.subplots(figsize=(10.6,10),dpi=160)
+    fig.patch.set_facecolor("black")
+    ax.set_facecolor("black")
+    draw_sun(ax)
     stride=max(1,len(exy)//160)
-    ax.plot(exy[:,0],exy[:,1],color="#4DA6FF",linewidth=.72,label="Earth registered trajectory"); ax.plot(vxy[:,0],vxy[:,1],color="white",linewidth=.72,label="Venus registered trajectory")
-    ax.scatter(exy[::stride,0],exy[::stride,1],s=2,color="#4DA6FF"); ax.scatter(vxy[::stride,0],vxy[::stride,1],s=2,color="white")
-    ax.scatter([0],[0],s=30,facecolors="none",edgecolors="#39FF88",linewidths=1); ax.scatter([0],[0],s=5,color="#39FF88",label="Closest approach registration")
-    for f,c in ((ef,"#4DA6FF"),(vf,"white")):
-        a=math.radians(f.angle); ax.arrow(0,0,.72*math.cos(a),.72*math.sin(a),width=.004,head_width=.055,head_length=.075,length_includes_head=True,color=c)
-    ax.text(.025,.975,f"Closest approach: {utc}\nEarth track angle: {ef.angle:.6f}°\nVenus track angle: {vf.angle:.6f}°\nOpening angle: {opening:.6f}°",transform=ax.transAxes,va="top",color="white",fontsize=9,bbox={"boxstyle":"round,pad=.45","facecolor":"#101010","edgecolor":"#B0B0B0","alpha":.92})
-    ext=max(1.3,float(np.max(np.abs(exy))),float(np.max(np.abs(vxy)))); lim=min(max(1.35,ext*1.08),3.8)
-    ax.set(xlim=(-lim,lim),ylim=(-lim,lim),xlabel="Registered tangent-plane displacement X [solar radii]",ylabel="Registered tangent-plane displacement Y [solar radii]")
-    ax.set_aspect("equal"); ax.set_title(f"{year} Venus Transit — Registered Earth–Venus Crossing and Track Angles",color="white",fontsize=13,pad=14,weight="bold")
-    ax.xaxis.label.set_color("white"); ax.yaxis.label.set_color("white"); ax.tick_params(colors="white",width=.55,labelsize=8); ax.grid(True,color="#777777",alpha=.2,linewidth=.4)
-    for sp in ax.spines.values(): sp.set_color("#A0A0A0"); sp.set_linewidth(.55)
-    leg=ax.legend(loc="lower right",fontsize=8); leg.get_frame().set_facecolor("#0E0E0E"); leg.get_frame().set_edgecolor("#9A9A9A")
-    for t in leg.get_texts(): t.set_color("white")
-    fig.tight_layout(); fig.savefig(path,dpi=600,facecolor="black",bbox_inches="tight"); plt.close(fig)
+    ax.plot(exy[:,0],exy[:,1],color="#4DA6FF",linewidth=.72,label="Earth registered trajectory")
+    ax.plot(vxy[:,0],vxy[:,1],color="white",linewidth=.72,label="Venus registered trajectory")
+    ax.scatter(exy[::stride,0],exy[::stride,1],s=2,color="#4DA6FF")
+    ax.scatter(vxy[::stride,0],vxy[::stride,1],s=2,color="white")
+    ax.scatter([0],[0],s=30,facecolors="none",edgecolors="#39FF88",linewidths=1)
+    ax.scatter([0],[0],s=5,color="#39FF88",label="Closest approach registration")
+    for track,color in ((ef,"#4DA6FF"),(vf,"white")):
+        angle=math.radians(track.angle)
+        ax.arrow(0,0,.72*math.cos(angle),.72*math.sin(angle),width=.004,head_width=.055,head_length=.075,length_includes_head=True,color=color)
+    newline=chr(10)
+    annotation=newline.join([f"Closest approach: {utc}",f"Earth track angle: {ef.angle:.6f}°",f"Venus track angle: {vf.angle:.6f}°",f"Opening angle: {opening:.6f}°"])
+    ax.text(.025,.975,annotation,transform=ax.transAxes,va="top",color="white",fontsize=9,bbox={"boxstyle":"round,pad=.45","facecolor":"#101010","edgecolor":"#B0B0B0","alpha":.92})
+    extent=max(1.3,float(np.max(np.abs(exy))),float(np.max(np.abs(vxy))))
+    limit=min(max(1.35,extent*1.08),3.8)
+    ax.set(xlim=(-limit,limit),ylim=(-limit,limit),xlabel="Registered tangent-plane displacement X [solar radii]",ylabel="Registered tangent-plane displacement Y [solar radii]")
+    ax.set_aspect("equal")
+    ax.set_title(f"{year} Venus Transit — Registered Earth–Venus Crossing and Track Angles",color="white",fontsize=13,pad=14,weight="bold")
+    ax.xaxis.label.set_color("white")
+    ax.yaxis.label.set_color("white")
+    ax.tick_params(colors="white",width=.55,labelsize=8)
+    ax.grid(True,color="#777777",alpha=.2,linewidth=.4)
+    for spine in ax.spines.values():
+        spine.set_color("#A0A0A0")
+        spine.set_linewidth(.55)
+    legend=ax.legend(loc="lower right",fontsize=8)
+    legend.get_frame().set_facecolor("#0E0E0E")
+    legend.get_frame().set_edgecolor("#9A9A9A")
+    for text in legend.get_texts(): text.set_color("white")
+    fig.tight_layout()
+    fig.savefig(path,dpi=600,facecolor="black",bbox_inches="tight")
+    plt.close(fig)
 
 
 def process(year:int,center:str)->dict:
-    c=Time(center,scale="utc"); d=SEARCH_HALF_H/24; start=Time(c.jd-d,format="jd",scale="utc").strftime("%Y-%m-%d %H:%M"); stop=Time(c.jd+d,format="jd",scale="utc").strftime("%Y-%m-%d %H:%M")
+    c=Time(center,scale="utc")
+    d=SEARCH_HALF_H/24
+    start=Time(c.jd-d,format="jd",scale="utc").strftime("%Y-%m-%d %H:%M")
+    stop=Time(c.jd+d,format="jd",scale="utc").strftime("%Y-%m-%d %H:%M")
     e,v,s=query("399",start,stop),query("299",start,stop),query("10",start,stop)
-    if len(e.jd)!=len(v.jd) or len(e.jd)!=len(s.jd) or not np.allclose(e.jd,v.jd,atol=1e-11,rtol=0) or not np.allclose(e.jd,s.jd,atol=1e-11,rtol=0): raise RuntimeError("REJECTED mismatched grids")
-    ca,minsep=closest(e.jd,e.r,s.r,v.r); es,vs,ss=spl(e.jd,e.r),spl(e.jd,v.r),spl(e.jd,s.r); e0,v0,s0=ev(es,ca),ev(vs,ca),ev(ss,ca); x,y=basis(e0,s0)
-    m=np.abs((e.jd-ca)*24)<=FIT_HALF_H; h=(e.jd[m]-ca)*24
-    if int(m.sum())<300: raise RuntimeError("REJECTED sample count")
-    exy=np.column_stack(((e.r[m]-e0)@x,(e.r[m]-e0)@y)); vxy=np.column_stack(((v.r[m]-v0)@x,(v.r[m]-v0)@y)); ef,vf=fit(h,exy),fit(h,vxy)
-    opening=wrapdiff(ef.angle,vf.angle); verify=opening-wrapdiff(ef.angle,vf.angle)
+    aligned=len(e.jd)==len(v.jd)==len(s.jd) and np.allclose(e.jd,v.jd,atol=1e-11,rtol=0) and np.allclose(e.jd,s.jd,atol=1e-11,rtol=0)
+    if not aligned: raise RuntimeError("REJECTED mismatched grids")
+    ca,minsep=closest(e.jd,e.r,s.r,v.r)
+    es,vs,ss=spl(e.jd,e.r),spl(e.jd,v.r),spl(e.jd,s.r)
+    e0,v0,s0=ev(es,ca),ev(vs,ca),ev(ss,ca)
+    x,y=basis(e0,s0)
+    mask=np.abs((e.jd-ca)*24)<=FIT_HALF_H
+    hours=(e.jd[mask]-ca)*24
+    if int(mask.sum())<300: raise RuntimeError("REJECTED sample count")
+    exy=np.column_stack(((e.r[mask]-e0)@x,(e.r[mask]-e0)@y))
+    vxy=np.column_stack(((v.r[mask]-v0)@x,(v.r[mask]-v0)@y))
+    ef,vf=fit(hours,exy),fit(hours,vxy)
+    opening=wrapdiff(ef.angle,vf.angle)
+    verify=opening-wrapdiff(ef.angle,vf.angle)
     if not 0<=opening<=180: raise RuntimeError("REJECTED opening angle")
-    utc=Time(ca,format="jd",scale="tdb").utc.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]; path=OUT/PNGS[year]; make_plot(year,exy/R_SUN_KM,vxy/R_SUN_KM,ef,vf,opening,utc,path)
+    utc=Time(ca,format="jd",scale="tdb").utc.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    path=OUT/PNGS[year]
+    make_plot(year,exy/R_SUN_KM,vxy/R_SUN_KM,ef,vf,opening,utc,path)
     sun_as=math.asin(R_SUN_KM/float(np.linalg.norm(s0-e0)))*AS_PER_RAD
-    return {"transit_year":year,"closest_approach_utc":utc,"closest_approach_jd_tdb":ca,"earth_track_angle_deg":ef.angle,"venus_track_angle_deg":vf.angle,"opening_angle_deg":opening,"angle_verification_residual_deg":verify,"earth_slope":ef.slope,"venus_slope":vf.slope,"earth_rms":ef.rms,"venus_rms":vf.rms,"earth_curvature":ef.curvature,"venus_curvature":vf.curvature,"sample_count":int(m.sum()),"minimum_separation_arcsec":minsep*AS_PER_RAD,"solar_angular_radius_arcsec":sun_as,"png":str(path)}
+    return {"transit_year":year,"closest_approach_utc":utc,"closest_approach_jd_tdb":ca,"earth_track_angle_deg":ef.angle,"venus_track_angle_deg":vf.angle,"opening_angle_deg":opening,"angle_verification_residual_deg":verify,"earth_slope":ef.slope,"venus_slope":vf.slope,"earth_rms":ef.rms,"venus_rms":vf.rms,"earth_curvature":ef.curvature,"venus_curvature":vf.curvature,"sample_count":int(mask.sum()),"minimum_separation_arcsec":minsep*AS_PER_RAD,"solar_angular_radius_arcsec":sun_as,"png":str(path)}
 
 
 def main()->None:
     OUT.mkdir(parents=True,exist_ok=True)
-    print("CODE INPUTS\n-----------"); print(f"Version {VERSION}\nJPL source Horizons vectors API\nObserver/reference {LOCATION}; Sun=10 Venus=299 Earth=399\nFrame {REFPLANE}/{REFSYSTEM}; aberrations {ABERRATIONS}; cadence {STEP}\nSearch/Fit half-window {SEARCH_HALF_H:.1f}/{FIT_HALF_H:.1f} h\nOutput {OUT}")
-    for y,c in TRANSITS.items(): print(f"NOT USED AS CA INPUT {y} window center {c} UTC")
-    print("COMMENTS\n--------"); print("Fresh JPL vectors drive all geometry. Window centers identify events only. Closest approach, tangent-plane tracks, fits, slopes, RMS, curvature, and angles are calculated. DEBUG progress follows. REJECTED manual angles and closest-approach times are not inputs.")
+    section("CODE INPUTS")
+    print(f"Version                              {VERSION}")
+    print("JPL source                           Horizons vectors API")
+    print(f"Observer/reference                   {LOCATION}; Sun=10 Venus=299 Earth=399")
+    print(f"Frame                                {REFPLANE}/{REFSYSTEM}")
+    print(f"Aberrations/cadence                  {ABERRATIONS}/{STEP}")
+    print(f"Search/Fit half-window               {SEARCH_HALF_H:.1f}/{FIT_HALF_H:.1f} h")
+    print(f"Output                               {OUT}")
+    for year,center in TRANSITS.items(): print(f"NOT USED AS CA INPUT {year} window center {center} UTC")
+    section("COMMENTS")
+    print("Fresh JPL vectors drive all geometry. Window centers identify events only.")
+    print("Closest approach, projected tracks, slopes, RMS, curvature, and angles are calculated.")
+    print("DEBUG progress follows. REJECTED manual angles and closest-approach times are not inputs.")
     rows=[]
-    for y,c in TRANSITS.items(): print(f"DEBUG processing {y}",flush=True); rows.append(process(y,c))
+    for year,center in TRANSITS.items():
+        print(f"DEBUG processing {year}",flush=True)
+        rows.append(process(year,center))
     columns=["transit_year","closest_approach_utc","closest_approach_jd_tdb","earth_track_angle_deg","venus_track_angle_deg","opening_angle_deg","angle_verification_residual_deg","earth_slope","venus_slope","earth_rms","venus_rms","earth_curvature","venus_curvature","sample_count"]
-    csv_path=OUT/CSV; pd.DataFrame([{k:r[k] for k in columns} for r in rows]).to_csv(csv_path,index=False,float_format="%.12g")
-    print("RESULTS\n-------")
-    for r in rows: print(f"{r['transit_year']} CA {r['closest_approach_utc']} JD_TDB {r['closest_approach_jd_tdb']:.9f} Earth {r['earth_track_angle_deg']:.6f}° Venus {r['venus_track_angle_deg']:.6f}° Opening {r['opening_angle_deg']:.6f}° Verify {r['angle_verification_residual_deg']:.12f}°\nEarth slope {r['earth_slope']:.9f} RMS {r['earth_rms']:.6f} km curvature {r['earth_curvature']:.12e}; Venus slope {r['venus_slope']:.9f} RMS {r['venus_rms']:.6f} km curvature {r['venus_curvature']:.12e}; min separation {r['minimum_separation_arcsec']:.6f} arcsec; solar radius {r['solar_angular_radius_arcsec']:.6f} arcsec; samples {r['sample_count']}")
-    print("OUTPUT SUMMARY\n--------------"); print(f"CSV {csv_path}")
-    for r in rows: print(f"PNG {r['transit_year']} {r['png']} bytes {Path(r['png']).stat().st_size}")
+    csv_path=OUT/CSV
+    pd.DataFrame([{key:row[key] for key in columns} for row in rows]).to_csv(csv_path,index=False,float_format="%.12g")
+    section("RESULTS")
+    for row in rows:
+        print(f"{row['transit_year']} CA {row['closest_approach_utc']} JD_TDB {row['closest_approach_jd_tdb']:.9f} Earth {row['earth_track_angle_deg']:.6f}° Venus {row['venus_track_angle_deg']:.6f}° Opening {row['opening_angle_deg']:.6f}° Verify {row['angle_verification_residual_deg']:.12f}°")
+        print(f"Earth slope {row['earth_slope']:.9f} RMS {row['earth_rms']:.6f} km curvature {row['earth_curvature']:.12e}")
+        print(f"Venus slope {row['venus_slope']:.9f} RMS {row['venus_rms']:.6f} km curvature {row['venus_curvature']:.12e}")
+        print(f"Minimum separation {row['minimum_separation_arcsec']:.6f} arcsec; solar radius {row['solar_angular_radius_arcsec']:.6f} arcsec; samples {row['sample_count']}")
+    section("OUTPUT SUMMARY")
+    print(f"CSV {csv_path}")
+    for row in rows: print(f"PNG {row['transit_year']} {row['png']} bytes {Path(row['png']).stat().st_size}")
     print(f"Exactly six PNG figures {len(rows)==6}")
-    print("PAPER COMPARISON\n----------------"); print("NOT USED: no published angles or closest-approach values. Historical dates identify only broad JPL query windows.")
-    print("EQUATION STATUS\n---------------"); residual=max(abs(r['angle_verification_residual_deg']) for r in rows); print("VERIFIED opening_angle = abs(wrap180(Earth angle - Venus angle))\nVERIFIED 0 <= opening_angle <= 180 degrees\nVERIFIED tangent basis orthonormal and closest approach refined from minute JPL vectors"); print(f"Maximum residual {residual:.12e} deg\nEquation checks passed {residual<=1e-12 and all(0<=r['opening_angle_deg']<=180 for r in rows)}")
-    print(datetime.now().astimezone().isoformat(timespec="seconds")); print(VERSION)
+    section("PAPER COMPARISON")
+    print("NOT USED: no published angles or closest-approach values.")
+    print("Historical dates identify only broad JPL query windows.")
+    section("EQUATION STATUS")
+    residual=max(abs(row['angle_verification_residual_deg']) for row in rows)
+    print("VERIFIED opening_angle = abs(wrap180(Earth angle - Venus angle))")
+    print("VERIFIED 0 <= opening_angle <= 180 degrees")
+    print("VERIFIED tangent basis orthonormal and closest approach refined from minute JPL vectors")
+    print(f"Maximum residual {residual:.12e} deg")
+    print(f"Equation checks passed {residual<=1e-12 and all(0<=row['opening_angle_deg']<=180 for row in rows)}")
+    print(datetime.now().astimezone().isoformat(timespec="seconds"))
+    print(VERSION)
 
 if __name__=="__main__": main()
 # V0111
