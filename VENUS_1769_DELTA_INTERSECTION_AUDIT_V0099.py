@@ -1,10 +1,10 @@
 # V0099
-# Audit reference: standalone V0096 CSV intersection-label repair; Python/Matplotlib only; no AI images.
+# Audit reference: corrected V0096 delta-intersection audit; readable label offsets; absolute-magnitude delta difference; Matplotlib only; no AI images.
 from __future__ import annotations
 
 import math
-import subprocess
 import sys
+import subprocess
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -31,22 +31,19 @@ matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.interpolate import CubicSpline
-from scipy.optimize import brentq, minimize_scalar
 from IPython.display import Image, display
+from scipy.interpolate import CubicSpline
+from scipy.optimize import brentq
 
 VERSION = "V0099"
 LOCAL_TZ = ZoneInfo("America/Bogota")
 INPUT_NAME = "VENUS_1769_APRIME_BPRIME_AB_FOUR_CURVE_DELTA_V0096.csv"
-INPUT_DIR = Path("/content/VENUS_1769_APRIME_BPRIME_AB_FOUR_CURVE_DELTA_V0096_OUTPUT")
-INPUT_CANDIDATES = (
-    INPUT_DIR / INPUT_NAME,
-    Path("/content") / INPUT_NAME,
-    Path.cwd() / INPUT_NAME,
-)
+CONTACT_NAME = "VENUS_1769_APRIME_BPRIME_AB_FOUR_CURVE_DELTA_CONTACTS_V0096.csv"
+SEARCH_DIRS = [Path("/content"), Path("/content/VENUS_1769_APRIME_BPRIME_AB_FOUR_CURVE_DELTA_V0096_OUTPUT"), Path.cwd()]
 OUT = Path("/content/VENUS_1769_DELTA_INTERSECTION_AUDIT_V0099_OUTPUT")
 PNG = OUT / "VENUS_1769_DELTA_INTERSECTION_AUDIT_V0099.png"
 CSV = OUT / "VENUS_1769_DELTA_INTERSECTION_AUDIT_V0099.csv"
+SUMMARY_CSV = OUT / "VENUS_1769_DELTA_INTERSECTION_SUMMARY_V0099.csv"
 
 BG = "#000000"
 FG = "#F8FAFC"
@@ -54,154 +51,83 @@ MUTED = "#B8CBD6"
 GRID = "#263A4B"
 BLUE = "#42D7C3"
 GOLD = "#D89B18"
-GREEN = "#74D680"
+PURPLE = "#9B8CFF"
 RED = "#FF6B6B"
-PURPLE = "#B997FF"
+GREEN = "#74D680"
+WHITE = "#FFFFFF"
 TABLE_HEADER = "#23466F"
 TABLE_BODY = "#101A2E"
 TABLE_TEAL = "#164B55"
 TABLE_GOLD = "#563B0B"
+TABLE_RED = "#5A1515"
 
 
-def find_source() -> Path:
-    for p in INPUT_CANDIDATES:
-        if p.exists():
-            return p
-    matches = sorted(Path("/content").rglob(INPUT_NAME))
-    if matches:
-        return matches[0]
-    raise FileNotFoundError("V0096 CSV was not found. Run V0096 first, then run this V0099 audit.")
+def find_file(name: str) -> Path:
+    for root in SEARCH_DIRS:
+        candidate = root / name
+        if candidate.exists():
+            return candidate
+    for root in SEARCH_DIRS:
+        if root.exists():
+            hits = sorted(root.rglob(name))
+            if hits:
+                return hits[0]
+    raise FileNotFoundError(f"Could not find {name}. Run V0096 first in this Colab session.")
 
 
-def finite_xy(df: pd.DataFrame, ycol: str) -> tuple[np.ndarray, np.ndarray]:
-    x = pd.to_numeric(df["minute_from_start"], errors="coerce").to_numpy(float)
-    y = pd.to_numeric(df[ycol], errors="coerce").to_numpy(float)
-    keep = np.isfinite(x) & np.isfinite(y)
-    x = x[keep]
-    y = y[keep]
+def pick(df: pd.DataFrame, names: tuple[str, ...]) -> str:
+    lower = {c.lower(): c for c in df.columns}
+    for name in names:
+        if name.lower() in lower:
+            return lower[name.lower()]
+    raise KeyError(f"Missing columns {names}. Available columns: {list(df.columns)}")
+
+
+def utc_from_minutes(source_df: pd.DataFrame, minute: float) -> str:
+    if "utc" not in source_df.columns:
+        return "N/A"
+    x = source_df["minute_from_start"].to_numpy(float)
+    utc_values = source_df["utc"].astype(str).to_numpy()
+    idx = int(np.argmin(np.abs(x - float(minute))))
+    return str(utc_values[idx])
+
+
+def make_spline(x: np.ndarray, y: np.ndarray) -> CubicSpline:
     order = np.argsort(x)
-    x = x[order]
-    y = y[order]
-    uniq, idx = np.unique(x, return_index=True)
-    return uniq, y[idx]
+    xs = np.asarray(x[order], dtype=float)
+    ys = np.asarray(y[order], dtype=float)
+    unique_x, unique_idx = np.unique(xs, return_index=True)
+    unique_y = ys[unique_idx]
+    if len(unique_x) < 4:
+        raise RuntimeError("Need at least four unique samples for cubic interpolation.")
+    return CubicSpline(unique_x, unique_y, bc_type="natural")
 
 
-def roots_of_spline(x: np.ndarray, y: np.ndarray) -> list[float]:
-    if len(x) < 4:
-        raise RuntimeError("Need at least four samples for cubic-spline root finding.")
-    cs = CubicSpline(x, y, bc_type="natural")
-    dense = np.linspace(float(x.min()), float(x.max()), max(4000, len(x) * 10))
-    vals = cs(dense)
+def roots_for(x: np.ndarray, y: np.ndarray) -> list[float]:
+    spline = make_spline(x, y)
+    xs = np.asarray(x, dtype=float)
     roots: list[float] = []
-    for i in range(len(dense) - 1):
-        a = float(dense[i])
-        b = float(dense[i + 1])
-        ya = float(vals[i])
-        yb = float(vals[i + 1])
-        if not math.isfinite(ya) or not math.isfinite(yb):
-            continue
-        if abs(ya) < 1e-14:
-            root = a
-        elif ya * yb < 0.0:
-            root = float(brentq(lambda t: float(cs(t)), a, b, xtol=1e-12, rtol=1e-12, maxiter=100))
-        else:
-            continue
-        if not roots or abs(root - roots[-1]) > 1e-5:
-            roots.append(root)
-    return roots
+    for i in range(len(xs) - 1):
+        a = float(xs[i])
+        b = float(xs[i + 1])
+        fa = float(spline(a))
+        fb = float(spline(b))
+        if abs(fa) < 1e-14:
+            roots.append(a)
+        elif fa * fb < 0.0:
+            roots.append(float(brentq(lambda z: float(spline(z)), a, b, xtol=1e-11, rtol=1e-13)))
+    clean: list[float] = []
+    for r in sorted(roots):
+        if not clean or abs(r - clean[-1]) > 1e-6:
+            clean.append(r)
+    return clean
 
 
-def extremum_near_zero(x: np.ndarray, y: np.ndarray) -> float:
-    cs = CubicSpline(x, y, bc_type="natural")
-    res = minimize_scalar(lambda t: abs(float(cs(t))), bounds=(float(x.min()), float(x.max())), method="bounded", options={"xatol": 1e-10})
-    if not res.success:
-        raise RuntimeError("Minimum absolute residual solve failed.")
-    return float(res.x)
+def y_at(x: np.ndarray, y: np.ndarray, minute: float) -> float:
+    return float(make_spline(x, y)(float(minute)))
 
 
-def interp_value(x: np.ndarray, y: np.ndarray, xp: float) -> float:
-    return float(CubicSpline(x, y, bc_type="natural")(float(xp)))
-
-
-def load_and_analyze() -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float | str], Path]:
-    source = find_source()
-    df = pd.read_csv(source)
-    required = [
-        "minute_from_start",
-        "delta_apbp_arcsec",
-        "delta_ab_arcsec",
-        "delta_apbp_2x_arcsec",
-        "delta_ab_2x_arcsec",
-    ]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise KeyError(f"Missing V0096 columns: {missing}. Available columns: {list(df.columns)}")
-    x_ap, d_ap = finite_xy(df, "delta_apbp_arcsec")
-    x_ab, d_ab = finite_xy(df, "delta_ab_arcsec")
-    if not np.array_equal(x_ap, x_ab):
-        xmin = max(float(x_ap.min()), float(x_ab.min()))
-        xmax = min(float(x_ap.max()), float(x_ab.max()))
-        x = np.linspace(xmin, xmax, min(len(x_ap), len(x_ab)))
-        ap = CubicSpline(x_ap, d_ap, bc_type="natural")(x)
-        ab = CubicSpline(x_ab, d_ab, bc_type="natural")(x)
-    else:
-        x = x_ap
-        ap = d_ap
-        ab = d_ab
-
-    diff = ap - ab
-    ap_roots = roots_of_spline(x, ap)
-    ab_roots = roots_of_spline(x, ab)
-    equal_roots = roots_of_spline(x, diff)
-    ap_zero = ap_roots[0] if ap_roots else extremum_near_zero(x, ap)
-    ab_zero = ab_roots[0] if ab_roots else extremum_near_zero(x, ab)
-    equal_root = equal_roots[0] if equal_roots else extremum_near_zero(x, diff)
-
-    # Use approximate geocentric CA marker as the sample whose |2x ΔA′B′| is smallest near central transit.
-    mid = 0.5 * (float(x.min()) + float(x.max()))
-    mask = np.abs(x - mid) < 30.0
-    if mask.any():
-        local_idx = int(np.argmin(np.abs(ap[mask])))
-        ca_x = float(x[mask][local_idx])
-    else:
-        ca_x = float(x[int(np.argmin(np.abs(ap)))])
-
-    stats: dict[str, float | str] = {
-        "source": str(source),
-        "apbp_zero_min": float(ap_zero),
-        "ab_zero_min": float(ab_zero),
-        "equal_root_min": float(equal_root),
-        "ca_marker_min": float(ca_x),
-        "apbp_zero_delta": interp_value(x, ap, ap_zero),
-        "ab_zero_delta": interp_value(x, ab, ab_zero),
-        "equal_apbp_delta": interp_value(x, ap, equal_root),
-        "equal_ab_delta": interp_value(x, ab, equal_root),
-        "equal_delta_gap": interp_value(x, diff, equal_root),
-        "ca_delta_apbp": interp_value(x, ap, ca_x),
-        "ca_delta_ab": interp_value(x, ab, ca_x),
-        "mean_apbp": float(np.mean(ap)),
-        "mean_ab": float(np.mean(ab)),
-        "rms_apbp": float(np.sqrt(np.mean(ap ** 2))),
-        "rms_ab": float(np.sqrt(np.mean(ab ** 2))),
-    }
-    out_df = pd.DataFrame({
-        "minute_from_start": x,
-        "delta_apbp_arcsec": ap,
-        "delta_ab_arcsec": ab,
-        "delta_difference_apbp_minus_ab_arcsec": diff,
-        "delta_apbp_2x_arcsec": 2.0 * ap,
-        "delta_ab_2x_arcsec": 2.0 * ab,
-    })
-    rows = [
-        {"quantity": "ΔA′B′ zero crossing", "minute_from_start": stats["apbp_zero_min"], "delta_apbp_arcsec": stats["apbp_zero_delta"], "delta_ab_arcsec": interp_value(x, ab, float(stats["apbp_zero_min"])), "trace": "root of ΔA′B′"},
-        {"quantity": "ΔAB zero crossing", "minute_from_start": stats["ab_zero_min"], "delta_apbp_arcsec": interp_value(x, ap, float(stats["ab_zero_min"])), "delta_ab_arcsec": stats["ab_zero_delta"], "trace": "root of ΔAB"},
-        {"quantity": "ΔA′B′ = ΔAB intersection", "minute_from_start": stats["equal_root_min"], "delta_apbp_arcsec": stats["equal_apbp_delta"], "delta_ab_arcsec": stats["equal_ab_delta"], "trace": "root of ΔA′B′ - ΔAB"},
-        {"quantity": "center/CA comparison marker", "minute_from_start": stats["ca_marker_min"], "delta_apbp_arcsec": stats["ca_delta_apbp"], "delta_ab_arcsec": stats["ca_delta_ab"], "trace": "near central zero marker"},
-    ]
-    return out_df, pd.DataFrame(rows), stats, source
-
-
-def table_style(table, teal_rows=(), gold_rows=(), fontsize=6.4) -> None:
+def table_style(table, teal_rows=(), gold_rows=(), red_rows=(), fontsize=5.55) -> None:
     table.auto_set_font_size(False)
     for (row, _col), cell in table.get_celld().items():
         cell.set_edgecolor("#70879A")
@@ -217,89 +143,150 @@ def table_style(table, teal_rows=(), gold_rows=(), fontsize=6.4) -> None:
         elif row in gold_rows:
             cell.set_facecolor(TABLE_GOLD)
             cell.get_text().set_fontweight("bold")
+        elif row in red_rows:
+            cell.set_facecolor(TABLE_RED)
+            cell.get_text().set_fontweight("bold")
         else:
             cell.set_facecolor(TABLE_BODY)
 
 
-def plot(curves: pd.DataFrame, events: pd.DataFrame, stats: dict[str, float | str], source: Path) -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
-    events.to_csv(CSV, index=False, float_format="%.15f")
-    plt.close("all")
-    plt.rcParams.update({
-        "font.family": "DejaVu Serif",
-        "figure.facecolor": BG,
-        "axes.facecolor": BG,
-        "savefig.facecolor": BG,
-        "text.color": FG,
-        "axes.labelcolor": FG,
-        "xtick.color": MUTED,
-        "ytick.color": MUTED,
-        "axes.edgecolor": MUTED,
+def contact_minutes(contact_path: Path | None, source_df: pd.DataFrame) -> dict[str, float]:
+    if contact_path is None or not contact_path.exists():
+        return {}
+    cdf = pd.read_csv(contact_path)
+    if "event" not in cdf.columns or "jd_tdb" not in cdf.columns or "jd_tdb" not in source_df.columns:
+        return {}
+    start_jd = float(source_df["jd_tdb"].iloc[0]) if "jd_tdb" in source_df.columns else 0.0
+    out: dict[str, float] = {}
+    for event in ("C1", "C2", "CA", "C3", "C4"):
+        vals = pd.to_numeric(cdf.loc[cdf["event"].astype(str) == event, "jd_tdb"], errors="coerce").dropna().to_numpy(float)
+        if len(vals) and start_jd != 0.0:
+            out[event] = float((np.mean(vals) - start_jd) * 1440.0)
+    return out
+
+
+def analyze() -> tuple[pd.DataFrame, list[dict[str, object]], Path, Path | None, dict[str, float]]:
+    source = find_file(INPUT_NAME)
+    try:
+        contact = find_file(CONTACT_NAME)
+    except FileNotFoundError:
+        contact = None
+    df = pd.read_csv(source)
+    xcol = pick(df, ("minute_from_start",))
+    dap_col = pick(df, ("delta_apbp_arcsec", "apbp_delta_arcsec"))
+    dab_col = pick(df, ("delta_ab_arcsec", "ab_delta_arcsec"))
+    fixed_ap_col = pick(df, ("apbp_fixed_arcsec", "fixed_apbp_arcsec", "fixed_vector_apbp_arcsec"))
+    inst_ap_col = pick(df, ("apbp_instant_arcsec", "instant_apbp_arcsec"))
+    fixed_ab_col = pick(df, ("ab_fixed_arcsec", "fixed_ab_arcsec"))
+    inst_ab_col = pick(df, ("ab_instant_arcsec", "instant_ab_arcsec"))
+    base = pd.DataFrame({
+        "minute_from_start": pd.to_numeric(df[xcol], errors="coerce"),
+        "delta_apbp_arcsec": pd.to_numeric(df[dap_col], errors="coerce"),
+        "delta_ab_arcsec": pd.to_numeric(df[dab_col], errors="coerce"),
+        "apbp_fixed_arcsec": pd.to_numeric(df[fixed_ap_col], errors="coerce"),
+        "apbp_instant_arcsec": pd.to_numeric(df[inst_ap_col], errors="coerce"),
+        "ab_fixed_arcsec": pd.to_numeric(df[fixed_ab_col], errors="coerce"),
+        "ab_instant_arcsec": pd.to_numeric(df[inst_ab_col], errors="coerce"),
     })
+    if "utc" in df.columns:
+        base["utc"] = df["utc"].astype(str)
+    if "jd_tdb" in df.columns:
+        base["jd_tdb"] = pd.to_numeric(df["jd_tdb"], errors="coerce")
+    work = base.dropna(subset=["minute_from_start", "delta_apbp_arcsec", "delta_ab_arcsec"]).sort_values("minute_from_start").reset_index(drop=True)
+    if "utc" not in work.columns:
+        work["utc"] = "N/A"
+    work["delta_apbp_2x_arcsec"] = 2.0 * work["delta_apbp_arcsec"]
+    work["delta_ab_2x_arcsec"] = 2.0 * work["delta_ab_arcsec"]
+    work["abs_delta_difference_arcsec"] = np.abs(work["delta_apbp_arcsec"]) - np.abs(work["delta_ab_arcsec"])
+    work["abs_delta_difference_2x_arcsec"] = 2.0 * work["abs_delta_difference_arcsec"]
+    work["signed_delta_difference_2x_rejected"] = 2.0 * (work["delta_apbp_arcsec"] - work["delta_ab_arcsec"])
+
+    x = work["minute_from_start"].to_numpy(float)
+    dap = work["delta_apbp_arcsec"].to_numpy(float)
+    dab = work["delta_ab_arcsec"].to_numpy(float)
+    diff_abs = work["abs_delta_difference_arcsec"].to_numpy(float)
+    results: list[dict[str, object]] = []
+    for label, y, trace in (("ΔA′B′ zero", dap, "ΔA′B′ = 0"), ("ΔAB zero", dab, "ΔAB = 0"), ("Magnitude-difference zero", diff_abs, "|ΔA′B′| − |ΔAB| = 0")):
+        for n, minute in enumerate(roots_for(x, y), start=1):
+            results.append({"event": label if n == 1 else f"{label} #{n}", "minute_from_start": minute, "utc_nearest": utc_from_minutes(work, minute), "delta_apbp_arcsec": y_at(x, dap, minute), "delta_ab_arcsec": y_at(x, dab, minute), "abs_delta_difference_arcsec": y_at(x, diff_abs, minute), "trace": trace})
+    stats = {"mean_delta_apbp": float(np.mean(dap)), "mean_delta_ab": float(np.mean(dab)), "mean_abs_delta_difference": float(np.mean(diff_abs)), "rms_delta_apbp": float(np.sqrt(np.mean(dap ** 2))), "rms_delta_ab": float(np.sqrt(np.mean(dab ** 2))), "rms_abs_delta_difference": float(np.sqrt(np.mean(diff_abs ** 2)))}
+    return work, results, source, contact, stats
+
+
+def annotate_label(ax, row: dict[str, object], y_value: float, xytext: tuple[float, float], align: tuple[str, str], color: str) -> None:
+    minute = float(row["minute_from_start"])
+    label = str(row["event"])
+    text = f"{label}\nx={minute:.6f} min\nΔA′B′={float(row['delta_apbp_arcsec']):+.9f}″\nΔAB={float(row['delta_ab_arcsec']):+.9f}″"
+    ax.scatter([minute], [y_value], s=54, marker="X", color=color, edgecolors=WHITE, linewidths=0.42, zorder=8)
+    ax.annotate(text, xy=(minute, y_value), xytext=xytext, textcoords="offset points", ha=align[0], va=align[1], fontsize=7.0, color=FG, arrowprops={"arrowstyle": "-", "color": FG, "linewidth": 0.36}, bbox={"boxstyle": "round,pad=0.22", "facecolor": "#050505", "edgecolor": color, "linewidth": 0.35, "alpha": 0.82}, zorder=9)
+
+
+def plot(work: pd.DataFrame, results: list[dict[str, object]], source: Path, contact: Path | None, stats: dict[str, float]) -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    work.to_csv(CSV, index=False, float_format="%.15f")
+    pd.DataFrame(results).to_csv(SUMMARY_CSV, index=False, float_format="%.15f")
+    x = work["minute_from_start"].to_numpy(float)
+    dap2 = work["delta_apbp_2x_arcsec"].to_numpy(float)
+    dab2 = work["delta_ab_2x_arcsec"].to_numpy(float)
+    diff2 = work["abs_delta_difference_2x_arcsec"].to_numpy(float)
+    plt.close("all")
+    plt.rcParams.update({"font.family": "DejaVu Serif", "figure.facecolor": BG, "axes.facecolor": BG, "savefig.facecolor": BG, "text.color": FG, "axes.labelcolor": FG, "xtick.color": MUTED, "ytick.color": MUTED, "axes.edgecolor": MUTED})
     fig = plt.figure(figsize=(16, 9), facecolor=BG)
-    gs = fig.add_gridspec(2, 1, height_ratios=[0.72, 0.28], left=0.055, right=0.985, top=0.895, bottom=0.105, hspace=0.155)
+    gs = fig.add_gridspec(2, 1, height_ratios=[0.74, 0.26], left=0.055, right=0.985, top=0.895, bottom=0.115, hspace=0.145)
     ax = fig.add_subplot(gs[0, 0])
     tab_ax = fig.add_subplot(gs[1, 0])
-    fig.suptitle("1769 Venus Transit — Bottom-Panel Delta Intersection Audit", fontsize=15.0, fontweight="bold", y=0.965)
-    fig.text(0.5, 0.932, "V0099 label-repair widget: left/right/up offsets separate all intersection annotations.", ha="center", fontsize=7.5, color=MUTED)
-
-    x = curves["minute_from_start"].to_numpy(float)
-    ap2 = curves["delta_apbp_2x_arcsec"].to_numpy(float)
-    ab2 = curves["delta_ab_2x_arcsec"].to_numpy(float)
-    diff2 = 2.0 * curves["delta_difference_apbp_minus_ab_arcsec"].to_numpy(float)
-
-    ax.axhline(0.0, color=FG, linewidth=0.42, alpha=0.70, zorder=1)
-    ax.axhline(2.0 * float(stats["mean_apbp"]), color=GOLD, linewidth=0.55, linestyle="--", alpha=0.80, zorder=1, label=f"2× mean ΔA′B′ = {2*float(stats['mean_apbp']):+.12f}″")
-    ax.axhline(2.0 * float(stats["mean_ab"]), color=PURPLE, linewidth=0.55, linestyle="--", alpha=0.80, zorder=1, label=f"2× mean ΔAB = {2*float(stats['mean_ab']):+.12f}″")
-    ax.plot(x, ap2, color=GOLD, linewidth=0.70, label="2× ΔA′B′", zorder=3)
-    ax.plot(x, ab2, color=PURPLE, linewidth=0.70, label="2× ΔAB", zorder=3)
-    ax.plot(x, diff2, color=BLUE, linewidth=0.55, linestyle=":", label="2×(ΔA′B′ − ΔAB)", zorder=2)
-
-    points = [
-        ("ΔA′B′=0", float(stats["apbp_zero_min"]), 2.0 * float(stats["apbp_zero_delta"]), GOLD, (-34, 0.030), "right", "bottom"),
-        ("ΔAB=0", float(stats["ab_zero_min"]), 2.0 * float(stats["ab_zero_delta"]), PURPLE, (34, -0.036), "left", "top"),
-        ("ΔA′B′=ΔAB", float(stats["equal_root_min"]), 2.0 * float(stats["equal_apbp_delta"]), BLUE, (16, 0.058), "left", "bottom"),
-        ("center marker", float(stats["ca_marker_min"]), 2.0 * float(stats["ca_delta_apbp"]), RED, (-40, -0.058), "right", "top"),
-    ]
-    for label, px, py, color, offset, ha, va in points:
-        dx, dy = offset
-        ax.scatter([px], [py], s=50 if label != "center marker" else 62, marker="X" if label != "center marker" else "P", color=color, edgecolors=FG, linewidths=0.34, zorder=8)
-        ax.axvline(px, color=color, linewidth=0.34, alpha=0.60, zorder=1)
-        ax.annotate(f"{label}\nx={px:.6f} min\ny={py:+.12f}″", xy=(px, py), xytext=(px + dx, py + dy), ha=ha, va=va, fontsize=7.2, color=FG, arrowprops={"arrowstyle": "-", "color": FG, "linewidth": 0.30}, bbox={"boxstyle": "round,pad=0.20", "facecolor": "#050505", "edgecolor": color, "linewidth": 0.32, "alpha": 0.78})
-
-    ylo = min(float(ap2.min()), float(ab2.min()), float(diff2.min()))
-    yhi = max(float(ap2.max()), float(ab2.max()), float(diff2.max()))
-    pad = max(0.025, 0.20 * (yhi - ylo))
-    ax.set_xlim(float(x.min()) - 6.0, float(x.max()) + 6.0)
-    ax.set_ylim(ylo - pad, yhi + pad)
-    ax.set_xlabel("Elapsed time from first C1–C4 sample (minutes)", fontsize=9)
-    ax.set_ylabel("2× delta / intersection residual (arcsec)", fontsize=9)
-    ax.grid(True, color=GRID, linewidth=0.34, alpha=0.58)
-    ax.tick_params(labelsize=7.5, width=0.35, length=2.4)
+    fig.suptitle("1769 Venus Transit — Delta Intersection Audit V0099", fontsize=15.5, fontweight="bold", y=0.965)
+    fig.text(0.5, 0.933, "Corrected third curve: 2×(|ΔA′B′| − |ΔAB|). Labels separated left/right/upper for readable intersection values.", ha="center", fontsize=7.6, color=MUTED)
+    ax.axhline(0.0, color=WHITE, linewidth=0.42, alpha=0.72, zorder=1, label="zero reference")
+    ax.plot(x, dap2, color=GOLD, linewidth=0.78, label="2× ΔA′B′ = 2×(instant − fixed)", zorder=3)
+    ax.plot(x, dab2, color=PURPLE, linewidth=0.78, label="2× ΔAB = 2×(instant − fixed)", zorder=3)
+    ax.plot(x, diff2, color=GREEN, linewidth=0.82, linestyle="--", label="2×(|ΔA′B′| − |ΔAB|), corrected", zorder=4)
+    ax.axhline(2.0 * stats["mean_delta_apbp"], color=GOLD, linewidth=0.45, linestyle=":", alpha=0.82, label=f"2× mean ΔA′B′ = {2.0 * stats['mean_delta_apbp']:+.9f}″")
+    ax.axhline(2.0 * stats["mean_delta_ab"], color=PURPLE, linewidth=0.45, linestyle=":", alpha=0.82, label=f"2× mean ΔAB = {2.0 * stats['mean_delta_ab']:+.9f}″")
+    ax.axhline(2.0 * stats["mean_abs_delta_difference"], color=GREEN, linewidth=0.45, linestyle=":", alpha=0.82, label=f"2× mean |Δ|-|Δ| = {2.0 * stats['mean_abs_delta_difference']:+.9f}″")
+    contacts = contact_minutes(contact, work) if contact is not None else {}
+    for event, minute in contacts.items():
+        color = RED if event == "CA" else BLUE
+        ax.axvline(minute, color=color, linewidth=0.30, alpha=0.55, zorder=1)
+        ymark = float(np.interp(minute, x, dap2))
+        ax.scatter([minute], [ymark], s=16 if event != "CA" else 30, color=color, edgecolors=WHITE, linewidths=0.20, zorder=6)
+        ax.annotate(event, xy=(minute, ymark), xytext=(0, 8 if event in ("C1", "C2", "CA") else -10), textcoords="offset points", ha="center", va="bottom" if event in ("C1", "C2", "CA") else "top", fontsize=6.2, color=FG)
+    first_by_event: dict[str, dict[str, object]] = {}
+    for row in results:
+        first_by_event.setdefault(str(row["event"]).split(" #", 1)[0], row)
+    if "ΔA′B′ zero" in first_by_event:
+        row = first_by_event["ΔA′B′ zero"]
+        annotate_label(ax, row, 2.0 * float(row["delta_apbp_arcsec"]), (-78, 60), ("right", "bottom"), GOLD)
+    if "ΔAB zero" in first_by_event:
+        row = first_by_event["ΔAB zero"]
+        annotate_label(ax, row, 2.0 * float(row["delta_ab_arcsec"]), (72, -56), ("left", "top"), PURPLE)
+    if "Magnitude-difference zero" in first_by_event:
+        row = first_by_event["Magnitude-difference zero"]
+        annotate_label(ax, row, 2.0 * float(row["abs_delta_difference_arcsec"]), (40, 62), ("left", "bottom"), GREEN)
+    ax.set_xlim(float(x.min()) - 5.0, float(x.max()) + 5.0)
+    ymin = min(float(np.min(dap2)), float(np.min(dab2)), float(np.min(diff2)))
+    ymax = max(float(np.max(dap2)), float(np.max(dab2)), float(np.max(diff2)))
+    pad = max(0.018, 0.18 * (ymax - ymin))
+    ax.set_ylim(ymin - pad, ymax + pad)
+    ax.set_ylabel("2× delta / corrected magnitude difference (arcsec)", fontsize=9.0)
+    ax.set_xlabel("Elapsed time from first C1–C4 sample (minutes)", fontsize=9.0)
+    ax.grid(True, color=GRID, linewidth=0.34, alpha=0.56)
+    ax.tick_params(labelsize=7.2, width=0.35, length=2.5)
     for spine in ax.spines.values():
         spine.set_color(MUTED)
         spine.set_linewidth(0.35)
-    leg = ax.legend(loc="upper right", frameon=False, fontsize=7.2)
-    for t in leg.get_texts():
-        t.set_color(FG)
-
+    leg = ax.legend(loc="upper right", frameon=False, fontsize=6.6, ncol=2)
+    for text in leg.get_texts():
+        text.set_color(FG)
     tab_ax.axis("off")
-    rows = [["Quantity", "Minute", "ΔA′B′", "ΔAB", "Unit / trace"]]
-    for _, row in events.iterrows():
-        rows.append([
-            str(row["quantity"]),
-            f"{float(row['minute_from_start']):.9f}",
-            f"{float(row['delta_apbp_arcsec']):+.12f}",
-            f"{float(row['delta_ab_arcsec']):+.12f}",
-            str(row["trace"]),
-        ])
-    rows.append(["Mean Δ", "all", f"{float(stats['mean_apbp']):+.12f}", f"{float(stats['mean_ab']):+.12f}", "arcsec"])
-    rows.append(["RMS Δ", "all", f"{float(stats['rms_apbp']):.12f}", f"{float(stats['rms_ab']):.12f}", "arcsec"])
-    table = tab_ax.table(cellText=rows, cellLoc="left", colWidths=[0.26, 0.16, 0.20, 0.20, 0.18], bbox=[0.0, 0.08, 1.0, 0.84])
-    table_style(table, teal_rows=(1, 2, 3), gold_rows=(4, 5, 6), fontsize=6.45)
-
-    fig.text(0.5, 0.042, f"File: VENUS_1769_DELTA_INTERSECTION_AUDIT_V0099.py | Source: {source.name} | Output: {PNG.name} | CSV: {CSV.name}", ha="center", fontsize=5.8, color=MUTED)
-    fig.savefig(PNG, dpi=220, facecolor=BG)
+    rows = [["Intersection / diagnostic", "Minute", "Nearest UTC", "ΔA′B′", "ΔAB", "|ΔA′B′|-|ΔAB|", "Trace"]]
+    for row in results[:6]:
+        rows.append([str(row["event"]), f"{float(row['minute_from_start']):.9f}", str(row["utc_nearest"]), f"{float(row['delta_apbp_arcsec']):+.12f}", f"{float(row['delta_ab_arcsec']):+.12f}", f"{float(row['abs_delta_difference_arcsec']):+.12f}", str(row["trace"])])
+    rows.extend([["Mean Δ", "—", "—", f"{stats['mean_delta_apbp']:+.12f}", f"{stats['mean_delta_ab']:+.12f}", f"{stats['mean_abs_delta_difference']:+.12f}", "arcsec"], ["RMS", "—", "—", f"{stats['rms_delta_apbp']:.12f}", f"{stats['rms_delta_ab']:.12f}", f"{stats['rms_abs_delta_difference']:.12f}", "arcsec"], ["Corrected formula", "—", "—", "2×ΔA′B′", "2×ΔAB", "2×(|ΔA′B′|-|ΔAB|)", "absolute magnitudes, not signed addition"]])
+    table = tab_ax.table(cellText=rows, cellLoc="left", colWidths=[0.20, 0.11, 0.17, 0.13, 0.13, 0.16, 0.10], bbox=[0.0, 0.02, 1.0, 0.92])
+    table_style(table, teal_rows=(1, 2, 3), gold_rows=(len(rows)-3, len(rows)-2), red_rows=(len(rows)-1,), fontsize=5.55)
+    fig.text(0.5, 0.043, f"File: VENUS_1769_DELTA_INTERSECTION_AUDIT_V0099.py | Input: {source.name} | Output: {PNG.name} | CSV: {CSV.name}", ha="center", fontsize=5.7, color=MUTED)
+    fig.savefig(PNG, dpi=230, facecolor=BG)
     display(Image(filename=str(PNG)))
 
 
@@ -309,22 +296,24 @@ def main() -> None:
     print(f"Input CSV target: {INPUT_NAME}")
     print("Data source: V0096 one-minute JPL-derived CSV already generated in Colab")
     print("COMMENTS")
-    print("Replots bottom-panel intersections with separated annotation labels: one left, one right, one above, and center marker below-left.")
+    print("Finds readable bottom-panel intersections and corrects the sign issue using |ΔA′B′| − |ΔAB|.")
     print("No AI images; Python/Matplotlib plot only.")
-    curves, events, stats, source = load_and_analyze()
-    plot(curves, events, stats, source)
+    work, results, source, contact, stats = analyze()
+    plot(work, results, source, contact, stats)
     print("RESULTS")
-    for _, row in events.iterrows():
-        print(f"{row['quantity']}: x={float(row['minute_from_start']):.12f} min, ΔA′B′={float(row['delta_apbp_arcsec']):+.12f} arcsec, ΔAB={float(row['delta_ab_arcsec']):+.12f} arcsec, trace={row['trace']}")
-    print(f"Mean ΔA′B′: {float(stats['mean_apbp']):+.12f} arcsec")
-    print(f"Mean ΔAB: {float(stats['mean_ab']):+.12f} arcsec")
+    for row in results:
+        print(f"{row['event']}: minute={float(row['minute_from_start']):.12f}; ΔA′B′={float(row['delta_apbp_arcsec']):+.12f} arcsec; ΔAB={float(row['delta_ab_arcsec']):+.12f} arcsec; |ΔA′B′|-|ΔAB|={float(row['abs_delta_difference_arcsec']):+.12f} arcsec; nearest UTC={row['utc_nearest']}")
+    print(f"Mean ΔA′B′: {stats['mean_delta_apbp']:+.12f} arcsec")
+    print(f"Mean ΔAB: {stats['mean_delta_ab']:+.12f} arcsec")
+    print(f"Mean |ΔA′B′|-|ΔAB|: {stats['mean_abs_delta_difference']:+.12f} arcsec")
     print("OUTPUT SUMMARY")
     print(f"PNG: {PNG}")
     print(f"CSV: {CSV}")
+    print(f"SUMMARY CSV: {SUMMARY_CSV}")
     print("PAPER COMPARISON")
-    print("NOT USED: this is an internal V0096 JPL-derived delta-intersection audit only.")
+    print("NOT USED: this is an internal JPL-vector V0096 delta-intersection audit only.")
     print("EQUATION STATUS")
-    print("PASS: cubic-spline roots are solved from V0096 delta columns; labels are separated by fixed left/right/upper offsets for readability.")
+    print("PASS: ΔA′B′ and ΔAB are read from V0096; corrected comparison uses absolute-magnitude difference |ΔA′B′| − |ΔAB|, avoiding signed addition of opposite-signed deltas.")
     print(datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %z"))
     print(VERSION)
 
