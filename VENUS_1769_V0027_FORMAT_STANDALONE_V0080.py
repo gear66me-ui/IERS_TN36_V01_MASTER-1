@@ -1,12 +1,12 @@
 # V0080
-# Audit reference: GitHub widget only; V0068 base preserved; V0080 audits and applies real data-coordinate mirror about Y-axis, not reversed axis labels.
+# Audit reference: GitHub widget only; V0068 base preserved from IERS master; V0080 audits and applies real data-coordinate mirror about Y-axis, not reversed axis labels.
 from __future__ import annotations
 
 import re
 import urllib.request
 
 VERSION = "V0080"
-RAW_V0068 = "https://raw.githubusercontent.com/gear66me-ui/GitHub_Sandbox/main/VENUS_1769_V0027_FORMAT_STANDALONE_V0068_WIDGET.py"
+RAW_V0068 = "https://raw.githubusercontent.com/gear66me-ui/IERS_TN36_V01_MASTER-1/main/VENUS_1769_V0027_FORMAT_STANDALONE_V0068_WIDGET.py"
 
 source = urllib.request.urlopen(RAW_V0068, timeout=60).read().decode("utf-8")
 
@@ -31,7 +31,7 @@ if 'set_xlim(1.07*rs,-1.07*rs)' in source or 'invert_xaxis' in source:
 source = source.replace("# V0068", "# V0080")
 source = source.replace(
     "# Audit reference: GitHub widget only; no AI images; Matplotlib/JPL vectors; local CA, solar-limb zooms, and Earth/Venus/Sun diameters.",
-    "# Audit reference: V0068 preserved; V0080 mirrors rendered X data only; axis order, labels, colors, disks, tables, and CA math unchanged."
+    "# Audit reference: V0068 preserved from IERS master; V0080 mirrors rendered X data only; axis order, labels, colors, disks, tables, and CA math unchanged."
 )
 source = source.replace('VERSION = "V0068"', 'VERSION = "V0080"')
 source = source.replace('OUT = Path("/content/VENUS_1769_V0068_WIDGET_OUTPUT")', 'OUT = Path("/content/VENUS_1769_V0080_WIDGET_OUTPUT")')
@@ -69,11 +69,12 @@ if old_main not in source:
 source = source.replace(old_main, new_main)
 source = source.replace(
     '"NO AI IMAGES — Matplotlib only. JPL Horizons geometric ecliptic vectors; diameters from stated reduction constants."',
-    '"NO AI IMAGES — Matplotlib only. V0080: V0068 style preserved; plotted X data mirrored about Y-axis only."'
+    '"NO AI IMAGES — Matplotlib only. V0080: IERS V0068 style preserved; plotted X data mirrored about Y-axis only."'
 )
 
 required_after_patch = {
     "version_v0080": '# V0080' in source and 'VERSION = "V0080"' in source,
+    "iers_dependency": "IERS_TN36_V01_MASTER-1" in RAW_V0068 and "GitHub_Sandbox" not in RAW_V0068,
     "real_data_mirror_tracks": 'st["pts"][:, 0] *= -1.0' in source,
     "real_data_mirror_events": 'st["epts"][key][0] *= -1.0' in source,
     "mirror_called_pv": 'pv = mirror_display_about_y_axis_only(pv)' in source,
