@@ -1,5 +1,5 @@
-# V0089L
-# Audit reference: exact notebook-name standalone publication widget; complete Python/Matplotlib/JPL implementation; no external script references.
+# V0089M
+# Audit reference: exact notebook-name standalone publication widget; complete Python/Matplotlib/JPL implementation; no external Python source references; no Colab notebook metadata.
 from __future__ import annotations
 
 import math
@@ -12,14 +12,11 @@ from pathlib import Path
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-VERSION = "V0089L"
+VERSION = "V0089M"
 LOCAL_TZ = ZoneInfo("America/Bogota")
 ROOT = Path("/content")
 REPO = "gear66me-ui/IERS_TN36_V01_MASTER-1"
 FILE_NAME = "IERS 1769 VENUS TRANSIT FINAL.py"
-NOTEBOOK_TITLE = "IERS 1769 VENUS TRANSIT FINAL.ipynb"
-NOTEBOOK_ID = "1w10eJgjYJDnOPGoVHSFZXzq9izVuCgN_"
-NOTEBOOK_URL = f"https://colab.research.google.com/drive/{NOTEBOOK_ID}"
 REPO_PATH = FILE_NAME
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}/main/{quote(REPO_PATH)}"
 GITHUB_URL = f"https://github.com/{REPO}/blob/main/{quote(REPO_PATH)}"
@@ -565,8 +562,8 @@ def plot(pv: dict, va: dict, g: dict, max_resid: float) -> None:
     style_table(ct, teal=(4, 5, 9, 10), blue=(1, 2, 6, 7), fs=5.55)
 
     footer_1 = "Python/Matplotlib/JPL Horizons geometric vector reconstruction. Final publication widget."
-    footer_2 = f"Notebook: {NOTEBOOK_TITLE} | ID: {NOTEBOOK_ID} | Colab: {NOTEBOOK_URL}"
-    footer_3 = f"GitHub: {GITHUB_URL} | Raw: {RAW_URL} | File: {FILE_NAME} | Run: {CURL_COMMAND} ; {RUN_COMMAND}"
+    footer_2 = f"GitHub: {GITHUB_URL} | Raw: {RAW_URL} | File: {FILE_NAME}"
+    footer_3 = f"Run: {CURL_COMMAND} ; {RUN_COMMAND}"
     fig.text(0.5, 0.050, footer_1, ha="center", fontsize=5.8, color=MUTED)
     fig.text(0.5, 0.033, footer_2, ha="center", fontsize=4.9, color=MUTED)
     fig.text(0.5, 0.017, footer_3, ha="center", fontsize=4.4, color=MUTED)
@@ -593,14 +590,12 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     print("CODE INPUTS")
     print(f"Version: {VERSION}")
-    print(f"Notebook: {NOTEBOOK_TITLE}")
-    print(f"Notebook ID: {NOTEBOOK_ID}")
     print(f"Widget file: {FILE_NAME}")
     print("JPL source: Horizons geometric ecliptic vectors, one-minute cadence")
     print(f"Raster DPI: {DPI}; vector outputs: PDF and SVG")
     print("COMMENTS")
     print("Complete standalone script. No external Python source files are fetched or executed.")
-    print("Publication plot retained; fixed figure boundary used for saved files; footer metadata included.")
+    print("Publication plot retained; fixed figure boundary used for saved files; repository metadata included.")
     m = master_frame()
     c = cache_build(m)
     pv = station(c, PV)
@@ -644,4 +639,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-# V0089L
+# V0089M
