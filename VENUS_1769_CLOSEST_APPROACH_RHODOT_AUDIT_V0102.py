@@ -1,5 +1,5 @@
 # V0102
-# Audit reference: corrected rho-minimum closest-approach audit; same plotted rho defines CA; Python/Matplotlib only; no AI images.
+# Audit reference: clean rho-minimum closest-approach audit; same plotted rho defines CA; Python/Matplotlib only; no AI images.
 from __future__ import annotations
 
 import math
@@ -26,9 +26,6 @@ WINDOW_MIN = 30.0
 SUN_TARGET = "10"
 VENUS_TARGET = "299"
 GEOCENTER_LOCATION = "500@399"
-PROJECT_PRIOR_CA_UTC = "1769-06-03 22:19:15.599"
-PROJECT_V0096_CA_UTC = "1769-06-03 22:19:04.387"
-REJECTED_V0101_CA_UTC = "1769-06-03 22:07:39.611"
 
 BG = "#000000"
 FG = "#F8FAFC"
@@ -38,12 +35,10 @@ BLUE = "#42D7C3"
 GOLD = "#D89B18"
 GREEN = "#74D680"
 RED = "#FF6B6B"
-PURPLE = "#9B8CFF"
 TABLE_HEADER = "#23466F"
 TABLE_BODY = "#101A2E"
 TABLE_TEAL = "#164B55"
 TABLE_GOLD = "#563B0B"
-TABLE_RED = "#5A0F22"
 
 
 def require(import_name: str, package_name: str) -> None:
@@ -73,7 +68,7 @@ from astropy.time import Time
 from astroquery.jplhorizons import Horizons
 from IPython.display import Image, display
 from scipy.interpolate import CubicSpline
-from scipy.optimize import minimize_scalar, brentq
+from scipy.optimize import brentq, minimize_scalar
 
 warnings.filterwarnings("ignore", message=".*id_type.*deprecated.*")
 warnings.filterwarnings("ignore", message=".*dubious year.*")
@@ -93,10 +88,6 @@ def unit(v) -> np.ndarray:
 
 def utc_from_jd(jd: float) -> str:
     return Time(float(jd), format="jd", scale="tdb").utc.datetime.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-
-
-def jd_from_utc(utc_text: str) -> float:
-    return float(Time(utc_text, scale="utc").tdb.jd)
 
 
 def download(prefix: str, target_id: str) -> pd.DataFrame:
@@ -149,9 +140,7 @@ def vec(c: dict[str, object], prefix: str, jd: float) -> np.ndarray:
 def angle_arcsec_between(a: np.ndarray, b: np.ndarray) -> float:
     ua = unit(a)
     ub = unit(b)
-    cross = norm(np.cross(ua, ub))
-    dot = float(np.dot(ua, ub))
-    return ARCSEC_PER_RAD * math.atan2(cross, dot)
+    return ARCSEC_PER_RAD * math.atan2(norm(np.cross(ua, ub)), float(np.dot(ua, ub)))
 
 
 def rho_arcsec(c: dict[str, object], jd: float) -> float:
@@ -160,7 +149,7 @@ def rho_arcsec(c: dict[str, object], jd: float) -> float:
 
 def rho_dot_arcsec_per_min(c: dict[str, object], jd: float) -> float:
     h = 0.5 / 1440.0
-    return (rho_arcsec(c, jd + h) - rho_arcsec(c, jd - h)) / 1.0
+    return rho_arcsec(c, jd + h) - rho_arcsec(c, jd - h)
 
 
 def ratio_ev_es(c: dict[str, object], jd: float) -> float:
@@ -197,16 +186,16 @@ def analyze() -> tuple[pd.DataFrame, dict[str, float | str]]:
     ca_jd = solve_ca(c)
     rhodot_zero_jd = solve_rhodot_zero(c, ca_jd)
     grid_minutes = np.linspace(-WINDOW_MIN, WINDOW_MIN, int(2 * WINDOW_MIN) + 1)
-    rows = []
     min_rho = rho_arcsec(c, ca_jd)
     ratio0 = ratio_ev_es(c, ca_jd)
-    for m in grid_minutes:
-        jd = ca_jd + float(m) / 1440.0
+    rows = []
+    for minute in grid_minutes:
+        jd = ca_jd + float(minute) / 1440.0
         rho = rho_arcsec(c, jd)
         rd = rho_dot_arcsec_per_min(c, jd)
         ratio = ratio_ev_es(c, jd)
         rows.append({
-            "minute_from_true_rho_min": float(m),
+            "minute_from_true_rho_min": float(minute),
             "jd_tdb": float(jd),
             "utc": utc_from_jd(jd),
             "rho_arcsec": float(rho),
@@ -216,9 +205,6 @@ def analyze() -> tuple[pd.DataFrame, dict[str, float | str]]:
             "ev_es_ratio_delta_ppm": float((ratio / ratio0 - 1.0) * 1_000_000.0),
         })
     df = pd.DataFrame(rows)
-    prior_jd = jd_from_utc(PROJECT_PRIOR_CA_UTC)
-    v0096_jd = jd_from_utc(PROJECT_V0096_CA_UTC)
-    rejected_jd = jd_from_utc(REJECTED_V0101_CA_UTC)
     stats: dict[str, float | str] = {
         "ca_jd_tdb": ca_jd,
         "ca_utc": utc_from_jd(ca_jd),
@@ -230,31 +216,30 @@ def analyze() -> tuple[pd.DataFrame, dict[str, float | str]]:
         "rho_minus30_excess": float(df.loc[df["minute_from_true_rho_min"] == -30.0, "rho_excess_arcsec"].iloc[0]),
         "rho_plus30_excess": float(df.loc[df["minute_from_true_rho_min"] == 30.0, "rho_excess_arcsec"].iloc[0]),
         "ev_es_ppm_range": float(df["ev_es_ratio_delta_ppm"].max() - df["ev_es_ratio_delta_ppm"].min()),
-        "project_prior_ca_utc": PROJECT_PRIOR_CA_UTC,
-        "project_prior_offset_sec": (prior_jd - ca_jd) * 86400.0,
-        "v0096_ca_utc": PROJECT_V0096_CA_UTC,
-        "v0096_offset_sec": (v0096_jd - ca_jd) * 86400.0,
-        "rejected_v0101_ca_utc": REJECTED_V0101_CA_UTC,
-        "rejected_v0101_offset_sec": (rejected_jd - ca_jd) * 86400.0,
-        "samples": len(df),
+        "samples": int(len(df)),
     }
     OUT.mkdir(parents=True, exist_ok=True)
     df.to_csv(CSV, index=False, float_format="%.15f")
     return df, stats
 
 
-def table_style(table, gold_rows=(), teal_rows=(), red_rows=(), fontsize=6.7) -> None:
+def style_axis(ax) -> None:
+    ax.grid(True, color=GRID, linewidth=0.30, alpha=0.58)
+    ax.tick_params(labelsize=7.2, width=0.35, length=2.4)
+    for spine in ax.spines.values():
+        spine.set_color(MUTED)
+        spine.set_linewidth(0.35)
+
+
+def style_table(table, teal_rows=(), gold_rows=(), fontsize=6.0) -> None:
     table.auto_set_font_size(False)
     for (row, _col), cell in table.get_celld().items():
         cell.set_edgecolor("#70879A")
-        cell.set_linewidth(0.28)
+        cell.set_linewidth(0.30)
         cell.get_text().set_color(FG)
         cell.get_text().set_fontsize(fontsize)
         if row == 0:
             cell.set_facecolor(TABLE_HEADER)
-            cell.get_text().set_fontweight("bold")
-        elif row in red_rows:
-            cell.set_facecolor(TABLE_RED)
             cell.get_text().set_fontweight("bold")
         elif row in teal_rows:
             cell.set_facecolor(TABLE_TEAL)
@@ -264,14 +249,6 @@ def table_style(table, gold_rows=(), teal_rows=(), red_rows=(), fontsize=6.7) ->
             cell.get_text().set_fontweight("bold")
         else:
             cell.set_facecolor(TABLE_BODY)
-
-
-def style_axis(ax) -> None:
-    ax.grid(True, color=GRID, linewidth=0.30, alpha=0.60)
-    ax.tick_params(labelsize=7.3, width=0.35, length=2.4)
-    for spine in ax.spines.values():
-        spine.set_color(MUTED)
-        spine.set_linewidth(0.35)
 
 
 def plot(df: pd.DataFrame, stats: dict[str, float | str]) -> None:
@@ -287,83 +264,71 @@ def plot(df: pd.DataFrame, stats: dict[str, float | str]) -> None:
         "ytick.color": MUTED,
         "axes.edgecolor": MUTED,
     })
-    fig = plt.figure(figsize=(16, 9), facecolor=BG)
-    gs = fig.add_gridspec(4, 1, height_ratios=[0.31, 0.20, 0.20, 0.29], left=0.065, right=0.985, top=0.895, bottom=0.102, hspace=0.255)
-    ax_rho = fig.add_subplot(gs[0])
-    ax_dot = fig.add_subplot(gs[1], sharex=ax_rho)
-    ax_ratio = fig.add_subplot(gs[2], sharex=ax_rho)
-    ax_table = fig.add_subplot(gs[3])
-    fig.suptitle("1769 Venus Transit — Corrected Closest-Approach Audit", fontsize=14.3, fontweight="bold", y=0.965)
-    fig.text(0.5, 0.934, "CA is solved from the exact same plotted geocentric rho(t); raw d rho/dt is zero at t = 0. Previous table CA values are comparison-only.", ha="center", fontsize=7.6, color=MUTED)
-
     x = df["minute_from_true_rho_min"].to_numpy(float)
     rho = df["rho_arcsec"].to_numpy(float)
     rho_excess = df["rho_excess_arcsec"].to_numpy(float)
     rhodot = df["rho_dot_arcsec_per_min"].to_numpy(float)
     ratio_ppm = df["ev_es_ratio_delta_ppm"].to_numpy(float)
 
-    ax_rho.plot(x, rho, color=GOLD, linewidth=0.72, label="rho(t): apparent Venus-Sun center distance")
-    ax_rho.scatter(x, rho, s=5.5, color=GOLD, edgecolors="none", alpha=0.72)
-    ax_rho.axvline(0.0, color=BLUE, linewidth=0.55, alpha=0.85, label="true rho minimum / CA")
-    ax_rho.scatter([0.0], [float(stats["rho_min_arcsec"])], s=72, marker="D", color=BLUE, edgecolors=FG, linewidths=0.35, zorder=6)
-    ax_rho.annotate(f"true minimum rho = {float(stats['rho_min_arcsec']):.9f}\nUTC {stats['ca_utc']}", xy=(0.0, float(stats["rho_min_arcsec"])), xytext=(3.5, float(stats["rho_min_arcsec"]) + 1.2), ha="left", fontsize=7.4, arrowprops={"arrowstyle": "-", "color": FG, "linewidth": 0.32})
-    prior_x = float(stats["project_prior_offset_sec"]) / 60.0
-    v0096_x = float(stats["v0096_offset_sec"]) / 60.0
-    rej_x = float(stats["rejected_v0101_offset_sec"]) / 60.0
-    ax_rho.axvline(prior_x, color=GREEN, linewidth=0.42, alpha=0.72, linestyle="--", label="prior project CA comparison")
-    ax_rho.axvline(v0096_x, color=PURPLE, linewidth=0.42, alpha=0.72, linestyle="--", label="V0096 CA comparison")
-    if -WINDOW_MIN <= rej_x <= WINDOW_MIN:
-        ax_rho.axvline(rej_x, color=RED, linewidth=0.42, alpha=0.72, linestyle=":", label="REJECTED V0101 marker")
-    ax_rho.set_ylabel("rho arcsec", fontsize=8.7)
-    ax_rho.set_title("PHYSICAL DISTANCE CURVE: rho(t) MINIMUM DEFINES CLOSEST APPROACH", fontsize=10.0, fontweight="bold")
-    ax_rho.legend(loc="upper right", fontsize=6.4, frameon=False)
-    style_axis(ax_rho)
+    fig = plt.figure(figsize=(16, 9), facecolor=BG)
+    gs = fig.add_gridspec(4, 1, height_ratios=[0.32, 0.20, 0.20, 0.28], left=0.060, right=0.985, top=0.895, bottom=0.095, hspace=0.280)
+    ax1 = fig.add_subplot(gs[0])
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+    ax3 = fig.add_subplot(gs[2], sharex=ax1)
+    tax = fig.add_subplot(gs[3])
 
-    ax_dot.plot(x, rhodot, color=RED, linewidth=0.68, label="raw d rho/dt")
-    ax_dot.axhline(0.0, color=MUTED, linewidth=0.40, alpha=0.75)
-    ax_dot.axvline(0.0, color=BLUE, linewidth=0.55, alpha=0.85)
-    ax_dot.scatter([0.0], [float(stats["rhodot_at_ca"])], s=60, marker="X", color=BLUE, edgecolors=FG, linewidths=0.35, zorder=6)
-    ax_dot.annotate(f"raw d rho/dt at CA = {float(stats['rhodot_at_ca']):+.12e}\nzero offset = {float(stats['rhodot_zero_offset_sec']):+.6f} sec", xy=(0.0, 0.0), xytext=(-28.5, max(rhodot) * 0.55), ha="left", fontsize=7.2, arrowprops={"arrowstyle": "-", "color": FG, "linewidth": 0.30})
-    ax_dot.set_ylabel("arcsec/min", fontsize=8.7)
-    ax_dot.set_title("RAW DERIVATIVE CHECK: d rho/dt CROSSES ZERO AT TRUE CA", fontsize=10.0, fontweight="bold")
-    ax_dot.legend(loc="upper right", fontsize=6.4, frameon=False)
-    style_axis(ax_dot)
+    fig.suptitle("1769 Venus Transit — Clean Geocentric Closest-Approach Audit", fontsize=15.2, fontweight="bold", y=0.955)
+    fig.text(0.5, 0.925, "Fresh JPL Horizons geometric geocentric vectors. The plotted rho(t) minimum defines t = 0. No comparison or rejected markers are plotted.", ha="center", fontsize=7.5, color=MUTED)
 
-    ax_ratio.plot(x, rho_excess, color=GREEN, linewidth=0.68, label="rho(t) - rho_min")
-    ax_ratio.set_ylabel("rho excess arcsec", fontsize=8.7)
-    ax_ratio_b = ax_ratio.twinx()
-    ax_ratio_b.plot(x, ratio_ppm, color=GOLD, linewidth=0.58, linestyle=":", label="EV/ES ratio change")
-    ax_ratio_b.set_ylabel("EV/ES delta ppm", fontsize=8.0, color=MUTED)
-    ax_ratio_b.tick_params(labelsize=7.1, colors=MUTED, width=0.35, length=2.4)
-    for spine in ax_ratio_b.spines.values():
-        spine.set_color(MUTED)
-        spine.set_linewidth(0.35)
-    ax_ratio.axvline(0.0, color=BLUE, linewidth=0.55, alpha=0.85)
-    ax_ratio.set_xlabel("Minutes from true rho-minimum closest approach", fontsize=8.7)
-    ax_ratio.set_title("SCALE RATIO CHANGES SLOWLY; CA IS SELECTED BY THE ANGULAR MINIMUM", fontsize=10.0, fontweight="bold")
-    lines1, labels1 = ax_ratio.get_legend_handles_labels()
-    lines2, labels2 = ax_ratio_b.get_legend_handles_labels()
-    ax_ratio.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=6.4, frameon=False)
-    style_axis(ax_ratio)
+    ax1.plot(x, rho, color=GOLD, linewidth=0.62, label="rho(t): Venus–Sun center distance")
+    ax1.scatter(x, rho, s=5, color=GOLD, edgecolors="none", alpha=0.72)
+    ax1.axvline(0.0, color=BLUE, linewidth=0.58, alpha=0.85, label="true rho-min CA")
+    ax1.scatter([0.0], [float(stats["rho_min_arcsec"])], marker="D", s=64, color=BLUE, edgecolors=FG, linewidths=0.35, zorder=8)
+    ax1.annotate(f"true geocentric CA\n{stats['ca_utc']}\nρ = {float(stats['rho_min_arcsec']):.12f}″", xy=(0, float(stats["rho_min_arcsec"])), xytext=(3.5, float(stats["rho_min_arcsec"]) + 0.75), fontsize=7.0, color=FG, arrowprops={"arrowstyle": "-", "linewidth": 0.30, "color": FG})
+    ax1.set_title("PHYSICAL DISTANCE CURVE: rho(t) MINIMUM DEFINES CLOSEST APPROACH", fontsize=10, fontweight="bold")
+    ax1.set_ylabel("rho arcsec", fontsize=8.5)
+    ax1.legend(loc="upper right", fontsize=6.8, frameon=False)
+    style_axis(ax1)
 
-    ax_table.axis("off")
+    ax2.plot(x, rhodot, color=RED, linewidth=0.62, label="raw d rho/dt")
+    ax2.axhline(0.0, color=MUTED, linewidth=0.42, alpha=0.75)
+    ax2.axvline(0.0, color=BLUE, linewidth=0.58, alpha=0.85)
+    ax2.scatter([0.0], [float(stats["rhodot_at_ca"])], marker="X", s=52, color=BLUE, edgecolors=FG, linewidths=0.30, zorder=8)
+    ax2.annotate(f"dρ/dt at CA = {float(stats['rhodot_at_ca']):+.3e} ″/min", xy=(0, float(stats["rhodot_at_ca"])), xytext=(-28.0, max(rhodot) * 0.64), fontsize=7.0, color=FG, arrowprops={"arrowstyle": "-", "linewidth": 0.28, "color": FG})
+    ax2.set_title("RAW DERIVATIVE CHECK: d rho/dt CROSSES ZERO AT TRUE CA", fontsize=10, fontweight="bold")
+    ax2.set_ylabel("arcsec/min", fontsize=8.5)
+    ax2.legend(loc="upper right", fontsize=6.8, frameon=False)
+    style_axis(ax2)
+
+    ax3.plot(x, rho_excess, color=GREEN, linewidth=0.62, label="rho(t) − rho_min")
+    ax3.axvline(0.0, color=BLUE, linewidth=0.58, alpha=0.85)
+    ax3.set_ylabel("rho excess arcsec", fontsize=8.5)
+    ax3.set_xlabel("Minutes from true geocentric rho-minimum closest approach", fontsize=8.8)
+    ax3b = ax3.twinx()
+    ax3b.plot(x, ratio_ppm, color=GOLD, linewidth=0.48, linestyle=":", label="EV/ES ratio change")
+    ax3b.tick_params(labelsize=7.2, colors=MUTED)
+    ax3b.set_ylabel("EV/ES ppm", fontsize=8.2, color=MUTED)
+    ax3.set_title("SCALE RATIO CHANGES SLOWLY; CA IS SELECTED BY THE ANGULAR MINIMUM", fontsize=10, fontweight="bold")
+    lines1, labels1 = ax3.get_legend_handles_labels()
+    lines2, labels2 = ax3b.get_legend_handles_labels()
+    ax3.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=6.8, frameon=False)
+    style_axis(ax3)
+
+    tax.axis("off")
     rows = [
         ["Quantity", "Value", "Unit / status"],
-        ["TRUE plotted rho-min CA UTC", str(stats["ca_utc"]), "JPL solve: minimize same plotted rho(t)"],
+        ["True geocentric rho-min CA UTC", str(stats["ca_utc"]), "JPL solve: minimize same plotted rho(t)"],
         ["Minimum rho", f"{float(stats['rho_min_arcsec']):.12f}", "arcsec"],
-        ["Raw d rho/dt at CA", f"{float(stats['rhodot_at_ca']):+.12e}", "arcsec/min; should be zero"],
+        ["Raw d rho/dt at CA", f"{float(stats['rhodot_at_ca']):+.15e}", "arcsec/min; should be zero"],
         ["Raw d rho/dt zero offset", f"{float(stats['rhodot_zero_offset_sec']):+.9f}", "seconds from CA"],
-        ["Prior project CA", f"{stats['project_prior_ca_utc']}  ({float(stats['project_prior_offset_sec']):+.6f} sec)", "COMPARISON ONLY, NOT USED"],
-        ["V0096 CA", f"{stats['v0096_ca_utc']}  ({float(stats['v0096_offset_sec']):+.6f} sec)", "COMPARISON ONLY, NOT USED"],
-        ["REJECTED V0101 marker", f"{stats['rejected_v0101_ca_utc']}  ({float(stats['rejected_v0101_offset_sec']):+.6f} sec)", "REJECTED: not the plotted rho minimum"],
-        ["rho excess at -30 min", f"{float(stats['rho_minus30_excess']):.12f}", "arcsec above minimum"],
+        ["rho excess at −30 min", f"{float(stats['rho_minus30_excess']):.12f}", "arcsec above minimum"],
         ["rho excess at +30 min", f"{float(stats['rho_plus30_excess']):.12f}", "arcsec above minimum"],
         ["EV/ES ratio range over ±30 min", f"{float(stats['ev_es_ppm_range']):.12f}", "ppm"],
         ["Samples", f"{int(stats['samples'])}", "one-minute plotted window"],
     ]
-    table = ax_table.table(cellText=rows, cellLoc="left", colWidths=[0.30, 0.40, 0.30], bbox=[0.0, 0.06, 1.0, 0.90])
-    table_style(table, teal_rows=(1, 2, 3, 4), gold_rows=(5, 6, 8, 9, 10, 11), red_rows=(7,), fontsize=6.45)
-    fig.text(0.5, 0.037, f"File: {Path(__file__).name if '__file__' in globals() else 'VENUS_1769_CLOSEST_APPROACH_RHODOT_AUDIT_V0102.py'} | Output: {PNG.name} | CSV: {CSV.name}", ha="center", fontsize=5.9, color=MUTED)
+    table = tax.table(cellText=rows, cellLoc="left", colWidths=[0.30, 0.40, 0.30], bbox=[0.0, 0.05, 1.0, 0.88])
+    style_table(table, teal_rows=(1, 2, 3, 4), gold_rows=(5, 6, 7, 8), fontsize=6.1)
+    fig.text(0.5, 0.043, f"File: {Path(__file__).name if '__file__' in globals() else 'VENUS_1769_CLOSEST_APPROACH_RHODOT_AUDIT_V0102.py'} | Output: {PNG.name} | CSV: {CSV.name}", ha="center", fontsize=5.9, color=MUTED)
     fig.savefig(PNG, dpi=220, facecolor=BG)
     display(Image(filename=str(PNG)))
 
@@ -371,28 +336,29 @@ def plot(df: pd.DataFrame, stats: dict[str, float | str]) -> None:
 def main() -> None:
     print("CODE INPUTS")
     print(f"Version: {VERSION}")
-    print(f"JPL window: {START} to {STOP}; step {STEP}")
-    print("Geometry: geocentric Sun and Venus geometric ecliptic vectors; rho(t) is the plotted angular separation.")
+    print(f"UTC window: {START} to {STOP}; step: {STEP}")
+    print(f"Observer: Earth geocenter {GEOCENTER_LOCATION}")
+    print("Data source: fresh JPL Horizons geometric ecliptic vectors")
     print("COMMENTS")
-    print("Corrects the rejected CA-labeling error: closest approach is solved by minimizing the exact rho(t) curve that is plotted.")
-    print("Previous project CA timestamps are comparison-only and are not used in the calculation.")
+    print("Clean plot only: true geocentric rho-minimum closest approach, rho(t), raw d rho/dt, and EV/ES scale ratio.")
+    print("No rejected markers or previous-error comparison lines are plotted.")
     df, stats = analyze()
     plot(df, stats)
     print("RESULTS")
-    print(f"True plotted rho-min CA UTC: {stats['ca_utc']}")
+    print(f"True geocentric rho-min CA UTC: {stats['ca_utc']}")
     print(f"Minimum rho: {float(stats['rho_min_arcsec']):.12f} arcsec")
-    print(f"Raw d rho/dt at CA: {float(stats['rhodot_at_ca']):+.12e} arcsec/min")
+    print(f"Raw d rho/dt at CA: {float(stats['rhodot_at_ca']):+.15e} arcsec/min")
     print(f"Raw d rho/dt zero offset: {float(stats['rhodot_zero_offset_sec']):+.9f} sec")
-    print(f"Prior project CA comparison offset: {float(stats['project_prior_offset_sec']):+.6f} sec")
-    print(f"V0096 CA comparison offset: {float(stats['v0096_offset_sec']):+.6f} sec")
-    print(f"REJECTED V0101 marker offset: {float(stats['rejected_v0101_offset_sec']):+.6f} sec")
+    print(f"rho excess at -30 min: {float(stats['rho_minus30_excess']):.12f} arcsec")
+    print(f"rho excess at +30 min: {float(stats['rho_plus30_excess']):.12f} arcsec")
+    print(f"EV/ES ratio range over ±30 min: {float(stats['ev_es_ppm_range']):.12f} ppm")
     print("OUTPUT SUMMARY")
     print(f"PNG: {PNG}")
     print(f"CSV: {CSV}")
     print("PAPER COMPARISON")
-    print("PROJECT PRIOR COMPARISON ONLY: prior table CA values are reported as offsets but are not used to solve the corrected rho minimum.")
+    print("NOT USED: this is a JPL-only internal geometry audit; no literature values are imported.")
     print("EQUATION STATUS")
-    print("PASS: CA is defined as argmin rho(t), where rho(t) is the same plotted Venus-Sun angular center distance; raw d rho/dt is evaluated at that same CA.")
+    print("PASS: rho(t) is computed from geocentric JPL Sun and Venus vectors; CA is solved by minimizing that same rho(t); raw d rho/dt crosses zero at t=0.")
     print(datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %z"))
     print(VERSION)
 
