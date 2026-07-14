@@ -1,5 +1,5 @@
 # V0110
-# Audit reference: corrected gnomonic verification for the 1769 geocentric Sun-screen tangent-plane geometry audit.
+# Audit reference: single-panel normalized curvature comparison from fresh JPL Horizons geometric vectors.
 
 from __future__ import annotations
 
@@ -85,22 +85,23 @@ def fetch_json(url: str) -> dict:
     raise RuntimeError(f"Unable to retrieve fresh JPL Horizons vectors: {last_error}")
 
 
-def target_name(result: str, fallback: str) -> str:
-    for line in result.splitlines():
-        if line.startswith("Target body name:"):
-            return line.split(":", 1)[1].strip()
-    return fallback
-
-
-def fetch_vectors(target_id: str) -> VectorTable:
+def parse_vectors(target_id: str) -> VectorTable:
     url = horizons_url(target_id)
     payload = fetch_json(url)
     signature = payload.get("signature", {})
     if "NASA/JPL" not in str(signature.get("source", "")):
         raise RuntimeError(f"Unexpected Horizons signature: {signature}")
+
     result = payload.get("result", "")
     if "$$SOE" not in result or "$$EOE" not in result:
         raise RuntimeError("Horizons response contains no vector table")
+
+    target_name = target_id
+    for line in result.splitlines():
+        if line.startswith("Target body name:"):
+            target_name = line.split(":", 1)[1].strip()
+            break
+
     block = result.split("$$SOE", 1)[1].split("$$EOE", 1)[0]
     jd_values: list[float] = []
     xyz_values: list[list[float]] = []
@@ -109,17 +110,17 @@ def fetch_vectors(target_id: str) -> VectorTable:
         if len(cells) < 5:
             continue
         try:
-            jd_value = float(cells[0])
-            xyz_value = [float(cells[2]), float(cells[3]), float(cells[4])]
+            jd_values.append(float(cells[0]))
+            xyz_values.append([float(cells[2]), float(cells[3]), float(cells[4])])
         except ValueError:
             continue
-        jd_values.append(jd_value)
-        xyz_values.append(xyz_value)
+
     if len(jd_values) < 50:
         raise RuntimeError(f"Insufficient JPL vectors parsed: {len(jd_values)}")
+
     return VectorTable(
         target_id=target_id,
-        target_name=target_name(result, target_id),
+        target_name=target_name,
         jd=np.asarray(jd_values, dtype=float),
         xyz_km=np.asarray(xyz_values, dtype=float),
         request_url=url,
@@ -140,18 +141,17 @@ def angular_separation(u: np.ndarray, v: np.ndarray) -> np.ndarray:
     )
 
 
-def interpolate_minimum(jd: np.ndarray, y: np.ndarray) -> float:
-    index = int(np.argmin(y))
+def interpolate_minimum(jd: np.ndarray, values: np.ndarray) -> float:
+    index = int(np.argmin(values))
     lo = max(0, index - 7)
     hi = min(len(jd), index + 8)
     center = float(jd[index])
     x_minutes = (jd[lo:hi] - center) * 1440.0
-    fit = np.polynomial.Polynomial.fit(x_minutes, y[lo:hi], 6).convert()
-    roots = fit.deriv().roots()
+    fit = np.polynomial.Polynomial.fit(x_minutes, values[lo:hi], 6).convert()
     candidates = [0.0]
     lower = float(x_minutes.min())
     upper = float(x_minutes.max())
-    for root in roots:
+    for root in fit.deriv().roots():
         if abs(root.imag) < 1.0e-10 and lower <= root.real <= upper:
             candidates.append(float(root.real))
     minimum_x = min(candidates, key=lambda value: float(fit(value)))
@@ -182,7 +182,12 @@ def tangent_basis(reference: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return east, north
 
 
-def gnomonic(unit_vectors: np.ndarray, reference: np.ndarray, east: np.ndarray, north: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def gnomonic(
+    unit_vectors: np.ndarray,
+    reference: np.ndarray,
+    east: np.ndarray,
+    north: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
     denominator = unit_vectors @ reference
     if np.any(denominator <= 0.0):
         raise RuntimeError("Vector outside forward tangent plane")
@@ -240,37 +245,33 @@ def write_csv(path: Path, columns: tuple[np.ndarray, ...]) -> None:
             writer.writerow([f"{float(value):.12f}" for value in row])
 
 
-def make_figure(path: Path, elapsed: np.ndarray, venus_rho: np.ndarray, earth_rho: np.ndarray,
-                venus_norm: np.ndarray, earth_norm: np.ndarray, table_rows: list[tuple[str, str]]) -> None:
+def make_figure(
+    path: Path,
+    elapsed: np.ndarray,
+    venus_norm: np.ndarray,
+    earth_norm: np.ndarray,
+) -> None:
     plt.rcParams.update({
         "font.family": "DejaVu Sans",
-        "font.size": 9.0,
+        "font.size": 10.0,
         "axes.linewidth": 0.6,
         "xtick.major.width": 0.6,
         "ytick.major.width": 0.6,
     })
-    fig, axes = plt.subplots(2, 1, figsize=(8.3, 10.2), sharex=True)
-    fig.subplots_adjust(left=0.105, right=0.975, top=0.93, bottom=0.245, hspace=0.24)
-    axes[0].plot(elapsed, venus_rho, linewidth=0.9, label="Venus")
-    axes[0].plot(elapsed, earth_rho, linewidth=0.9, label="Earth")
-    axes[0].set_ylabel("Raw tangent-plane distance (arcsec)")
-    axes[0].set_title("Raw fixed Sun-screen tangent-plane distances")
-    axes[0].grid(True, linewidth=0.35, alpha=0.45)
-    axes[0].legend(frameon=False)
-    axes[1].plot(elapsed, venus_norm, linewidth=0.9, label="Venus")
-    axes[1].plot(elapsed, earth_norm, linewidth=0.9, label="Earth")
-    axes[1].set_xlabel("Minutes from true geocentric closest approach")
-    axes[1].set_ylabel("Normalized distance (0–1)")
-    axes[1].set_title("Normalized comparison only")
-    axes[1].grid(True, linewidth=0.35, alpha=0.45)
-    axes[1].legend(frameon=False)
-    axes[1].set_xlim(-WINDOW_MIN, WINDOW_MIN)
-    fig.suptitle("1769 Venus Transit — Geocentric Earth–Sun vs Venus Tangent-Plane Geometry",
-                 fontsize=13.0, fontweight="bold")
-    table_text = "\n".join(f"{label:<28} {value}" for label, value in table_rows)
-    fig.text(0.105, 0.055, table_text, ha="left", va="bottom", family="DejaVu Sans Mono",
-             fontsize=8.2, linespacing=1.35,
-             bbox={"boxstyle": "round,pad=0.55", "facecolor": "white", "edgecolor": "0.55", "linewidth": 0.6})
+
+    fig, ax = plt.subplots(figsize=(9.0, 5.8))
+    fig.subplots_adjust(left=0.11, right=0.97, top=0.88, bottom=0.14)
+
+    ax.plot(elapsed, venus_norm, linewidth=1.0, label="Venus")
+    ax.plot(elapsed, earth_norm, linewidth=1.0, label="Earth")
+    ax.set_xlim(-WINDOW_MIN, WINDOW_MIN)
+    ax.set_ylim(-0.03, 1.03)
+    ax.set_xlabel("Minutes from true geocentric closest approach")
+    ax.set_ylabel("Normalized tangent-plane distance (0–1)")
+    ax.set_title("1769 Venus Transit — Geocentric Curvature Comparison", fontweight="bold")
+    ax.grid(True, linewidth=0.35, alpha=0.45)
+    ax.legend(frameon=False, loc="upper center", ncol=2)
+
     fig.savefig(path, dpi=600, bbox_inches="tight")
     plt.show()
 
@@ -291,11 +292,14 @@ def main() -> None:
     section("COMMENTS", [
         "Fresh geometric state vectors are requested directly from NASA/JPL Horizons.",
         "The tangent plane is fixed to the geocentric Sun direction at interpolated closest approach.",
+        "The single plot compares the two normalized curvature traces only.",
     ])
 
-    sun = fetch_vectors("10")
-    venus = fetch_vectors("299")
-    if sun.jd.shape != venus.jd.shape or np.max(np.abs(sun.jd - venus.jd)) * 86400.0 > 1.0e-6:
+    sun = parse_vectors("10")
+    venus = parse_vectors("299")
+    if sun.jd.shape != venus.jd.shape:
+        raise RuntimeError("Sun and Venus JPL vector tables have different lengths")
+    if np.max(np.abs(sun.jd - venus.jd)) * 86400.0 > 1.0e-6:
         raise RuntimeError("Sun and Venus JPL epochs do not match")
 
     sun_unit = normalize_rows(sun.xyz_km)
@@ -305,7 +309,10 @@ def main() -> None:
 
     elapsed = np.linspace(-WINDOW_MIN, WINDOW_MIN, 121)
     output_jd = ca_jd + elapsed / 1440.0
-    mask = (sun.jd >= output_jd[0] - 10.0 / 1440.0) & (sun.jd <= output_jd[-1] + 10.0 / 1440.0)
+    mask = (
+        (sun.jd >= output_jd[0] - 10.0 / 1440.0)
+        & (sun.jd <= output_jd[-1] + 10.0 / 1440.0)
+    )
     local_jd = sun.jd[mask]
     sun_eval = interpolate_vectors(local_jd, sun.xyz_km[mask], output_jd)
     venus_eval = interpolate_vectors(local_jd, venus.xyz_km[mask], output_jd)
@@ -316,6 +323,7 @@ def main() -> None:
     east, north = tangent_basis(reference)
     sun_x, sun_y = gnomonic(normalize_rows(sun_eval), reference, east, north)
     venus_abs_x, venus_abs_y = gnomonic(normalize_rows(venus_eval), reference, east, north)
+
     venus_x = venus_abs_x - sun_x
     venus_y = venus_abs_y - sun_y
     venus_rho = np.hypot(venus_x, venus_y)
@@ -326,8 +334,10 @@ def main() -> None:
     earth_norm = normalize_curve(earth_rho)
 
     ca_venus_unit = ca_venus / np.linalg.norm(ca_venus)
-    ca_theta = math.atan2(np.linalg.norm(np.cross(ca_venus_unit, reference)),
-                          float(np.dot(ca_venus_unit, reference)))
+    ca_theta = math.atan2(
+        np.linalg.norm(np.cross(ca_venus_unit, reference)),
+        float(np.dot(ca_venus_unit, reference)),
+    )
     expected_gnomonic_rho = math.tan(ca_theta) * ARCSEC_PER_RAD
     venus_minimum = float(np.min(venus_rho))
     earth_minimum = float(np.min(earth_rho))
@@ -335,13 +345,27 @@ def main() -> None:
     if abs(equation_residual) > 5.0e-5:
         raise RuntimeError(
             f"Equation check failed: tangent-plane minimum {venus_minimum:.9f} arcsec vs "
-            f"tan(theta) projection {expected_gnomonic_rho:.9f} arcsec; residual {equation_residual:.9f} arcsec"
+            f"tan(theta) projection {expected_gnomonic_rho:.9f} arcsec; "
+            f"residual {equation_residual:.9f} arcsec"
         )
 
     csv_path = OUTPUT_DIR / CSV_NAME
     png_path = OUTPUT_DIR / PNG_NAME
-    write_csv(csv_path, (elapsed, output_jd, venus_x, venus_y, venus_rho,
-                         earth_x, earth_y, earth_rho, venus_norm, earth_norm))
+    write_csv(
+        csv_path,
+        (
+            elapsed,
+            output_jd,
+            venus_x,
+            venus_y,
+            venus_rho,
+            earth_x,
+            earth_y,
+            earth_rho,
+            venus_norm,
+            earth_norm,
+        ),
+    )
 
     table_rows = [
         ("Closest approach UTC", jd_to_utc(ca_jd)),
@@ -352,14 +376,17 @@ def main() -> None:
         ("Projection", "Fixed Sun tangent plane at closest approach"),
         ("JPL source", "NASA/JPL Horizons geometric vectors (VEC_CORR=NONE)"),
     ]
+
     section("RESULTS", [f"{label}: {value}" for label, value in table_rows])
-    make_figure(png_path, elapsed, venus_rho, earth_rho, venus_norm, earth_norm, table_rows)
+    make_figure(png_path, elapsed, venus_norm, earth_norm)
     section("OUTPUT SUMMARY", [f"PNG: {png_path}", f"CSV: {csv_path}"])
-    section("PAPER COMPARISON", ["Not used; all plotted quantities are derived from fresh JPL vectors."])
+    section("PAPER COMPARISON", [
+        "Not used; all plotted quantities are derived from fresh JPL vectors."
+    ])
     section("EQUATION STATUS", [
         "PASS: closest approach is obtained by interpolated minimization of angular separation squared.",
         "PASS: fixed-plane Venus minimum equals tan(direct angular separation) × arcseconds-per-radian.",
-        "PASS: Panel 1 Earth curve is raw and unnormalized.",
+        "PASS: one figure contains exactly two normalized curvature curves and no table bar.",
     ])
     print(datetime.now().astimezone().isoformat(timespec="seconds"))
     print(f"{VERSION} COMPLETE")
