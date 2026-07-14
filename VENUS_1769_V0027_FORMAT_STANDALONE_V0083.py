@@ -1,19 +1,18 @@
 # V0083
-# Audit reference: PNG output for corrected geometric and astronomical audit table; removed raw 3D and separate A′/B′ rows; one A′B′ value only.
+# Audit reference: PNG output for geometric and astronomical audit table; Vardø/Pointe Venus series title; no AI images.
 from __future__ import annotations
 
 import math
 import urllib.request
 from datetime import datetime
-from pathlib import Path
 
 VERSION = "V0083"
+PNG = "VENUS_1769_VARDO_POINTE_VENUS_GEOMETRIC_ASTRONOMICAL_TABLE_V0083.png"
 SOURCE_URL = (
     "https://raw.githubusercontent.com/gear66me-ui/"
     "IERS_TN36_V01_MASTER-1/main/"
     "VENUS_1769_V0027_FORMAT_STANDALONE_V0067.py"
 )
-PNG = Path("VENUS_1769_GEOMETRIC_ASTRONOMICAL_AUDIT_V0083.png")
 
 
 def fetch_verified_source() -> str:
@@ -27,7 +26,7 @@ def fetch_verified_source() -> str:
 
 def load_v0067_namespace() -> dict[str, object]:
     namespace: dict[str, object] = {
-        "__name__": "venus_v0067_audit",
+        "__name__": "venus_v0067_png_table",
         "__file__": "VENUS_1769_V0027_FORMAT_STANDALONE_V0067.py",
     }
     exec(
@@ -46,69 +45,85 @@ def fmt12(value: float) -> str:
     return f"{float(value):.12f}"
 
 
-def rgba_from_hex(hex_color: str, alpha: float = 1.0) -> tuple[float, float, float, float]:
-    text = hex_color.strip().lstrip("#")
-    return (
-        int(text[0:2], 16) / 255.0,
-        int(text[2:4], 16) / 255.0,
-        int(text[4:6], 16) / 255.0,
-        alpha,
+def make_png_table(ns: dict[str, object], rows: list[list[str]]) -> None:
+    plt = ns["plt"]
+    TABLE_HEADER = str(ns.get("TABLE_HEADER", "#263849"))
+    TABLE_TEAL = str(ns.get("TABLE_TEAL", "#183C48"))
+    TABLE_GOLD = str(ns.get("TABLE_GOLD", "#5C4A20"))
+    TABLE_BODY = str(ns.get("TABLE_BODY", "#121D28"))
+    BACKGROUND = str(ns.get("BACKGROUND", "#0B1118"))
+    TEXT_COLOR = str(ns.get("TEXT_COLOR", "#E8EEF4"))
+    MUTED_TEXT = str(ns.get("MUTED_TEXT", "#A9B7C6"))
+
+    plt.close("all")
+    plt.rcParams.update(
+        {
+            "font.family": "DejaVu Serif",
+            "mathtext.fontset": "dejavuserif",
+            "figure.facecolor": BACKGROUND,
+            "savefig.facecolor": BACKGROUND,
+            "text.color": TEXT_COLOR,
+        }
     )
 
-
-def save_png_table(rows: list[list[str]], row_groups: list[str], palette: dict[str, str]) -> None:
-    import matplotlib.pyplot as plt
-
-    background = "#0B1118"
-    text_color = "#E8EEF4"
-    edge_color = "#70879A"
-    figure = plt.figure(figsize=(13.2, 5.4), dpi=220, facecolor=background)
-    axis = figure.add_subplot(111)
-    axis.set_facecolor(background)
-    axis.axis("off")
-
-    axis.text(
+    fig, ax = plt.subplots(figsize=(13.2, 7.0), facecolor=BACKGROUND)
+    ax.axis("off")
+    fig.text(
         0.5,
-        0.965,
-        "1769 Venus Transit — Geometric and Astronomical Audit",
-        transform=axis.transAxes,
+        0.945,
+        "1769 Venus Transit — Vardø, Norway and Pointe Venus, Tahiti",
         ha="center",
-        va="top",
-        color=text_color,
-        fontsize=15.5,
+        va="center",
+        fontsize=17.5,
         fontweight="bold",
+        color=TEXT_COLOR,
+    )
+    fig.text(
+        0.5,
+        0.905,
+        "Geometric and Astronomical Audit — JPL-derived reduced distances and finite IAU 1976 parallax",
+        ha="center",
+        va="center",
+        fontsize=9.5,
+        color=MUTED_TEXT,
     )
 
-    table = axis.table(
+    table = ax.table(
         cellText=rows,
         cellLoc="left",
-        colWidths=[0.40, 0.20, 0.23, 0.17],
-        bbox=[0.02, 0.05, 0.96, 0.84],
+        colWidths=[0.42, 0.20, 0.22, 0.16],
+        bbox=[0.025, 0.115, 0.95, 0.74],
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(9.4)
+    table.set_fontsize(9.0)
 
-    color_map = {
-        "header": palette["header"],
-        "distance": palette["teal"],
-        "geometry": palette["gold"],
-        "final": palette["gold"],
-    }
-    for (row, column), cell in table.get_celld().items():
-        group = row_groups[row]
-        cell.set_facecolor(color_map[group])
-        cell.set_edgecolor(edge_color)
-        cell.set_linewidth(0.55)
-        cell.get_text().set_color(text_color)
-        if row == 0 or group in ("distance", "geometry", "final"):
+    for (r, c), cell in table.get_celld().items():
+        cell.set_edgecolor("#70879A")
+        cell.set_linewidth(0.45)
+        cell.get_text().set_color(TEXT_COLOR)
+        cell.get_text().set_ha("right" if c == 2 else "left")
+        if r == 0:
+            cell.set_facecolor(TABLE_HEADER)
             cell.get_text().set_fontweight("bold")
-        if column == 2:
-            cell.get_text().set_ha("right")
+        elif 1 <= r <= 4:
+            cell.set_facecolor(TABLE_TEAL)
+            cell.get_text().set_fontweight("bold")
+        elif 5 <= r <= 9:
+            cell.set_facecolor(TABLE_GOLD)
+            cell.get_text().set_fontweight("bold")
         else:
-            cell.get_text().set_ha("left")
+            cell.set_facecolor(TABLE_BODY)
 
-    figure.savefig(PNG, dpi=220, facecolor=background, bbox_inches="tight", pad_inches=0.14)
-    plt.close(figure)
+    fig.text(
+        0.5,
+        0.055,
+        f"Output: {PNG}     Version: {VERSION}",
+        ha="center",
+        fontsize=8.0,
+        color=MUTED_TEXT,
+    )
+    fig.savefig(PNG, dpi=220, bbox_inches="tight", facecolor=BACKGROUND)
+    plt.show()
 
 
 def main() -> None:
@@ -133,27 +148,18 @@ def main() -> None:
 
     rows = [
         ["Quantity", "Symbol", "Value", "Unit / status"],
-        ["Reduced Earth-Venus distance", "EV̅", fmt(ev_bar), "km"],
-        ["Reduced Venus-Sun distance", "VS̅", fmt(vs_bar), "km"],
-        ["Reduced Earth-Sun distance", "ES̅", fmt(es_bar), "km"],
-        ["Reduced distance closure", "EV̅ + VS̅ − ES̅", f"{reduced_closure:+.9f}", "km — PASS"],
+        ["Reduced Earth–Venus distance", "EV̄", fmt(ev_bar), "km"],
+        ["Reduced Venus–Sun distance", "VS̄", fmt(vs_bar), "km"],
+        ["Reduced Earth–Sun distance", "ES̄", fmt(es_bar), "km"],
+        ["Reduced distance closure", "EV̄ + VS̄ − ES̄", f"{reduced_closure:+.9f}", "km — PASS"],
         ["A′B′ common-normal separation", "A′B′", fmt(float(geometry["A_prime_B_prime_arcsec"])), "arcsec"],
         ["A′B′ common-normal separation", "A′B′", fmt(float(geometry["A_prime_B_prime_km"])), "km"],
         ["AB projected baseline", "AB", fmt(float(geometry["AB_arcsec"])), "arcsec"],
         ["AB projected baseline", "AB", fmt(float(geometry["AB_km"])), "km"],
-        ["Finite IAU 1976 solar horizontal parallax", "π$_{finite,IAU76}$", fmt12(pi_finite_iau76), "arcsec"],
+        ["Finite IAU 1976 solar horizontal parallax", r"$\pi_{\mathrm{finite,IAU76}}$", fmt12(pi_finite_iau76), "arcsec"],
     ]
-    row_groups = ["header", "distance", "distance", "distance", "distance", "geometry", "geometry", "geometry", "geometry", "final"]
-    palette = {
-        "header": str(ns.get("TABLE_HEADER", "#263849")),
-        "teal": str(ns.get("TABLE_TEAL", "#183C48")),
-        "gold": str(ns.get("TABLE_GOLD", "#5C4A20")),
-    }
 
-    save_png_table(rows, row_groups, palette)
-
-    from IPython.display import Image, display
-    display(Image(filename=str(PNG)))
+    make_png_table(ns, rows)
     print(f"PNG: {PNG}")
     print(datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %z"))
     print(VERSION)
