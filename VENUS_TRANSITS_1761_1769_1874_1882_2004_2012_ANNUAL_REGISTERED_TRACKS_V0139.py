@@ -1,5 +1,5 @@
 # V0139
-# Audit reference: preserve the approved V0139 annual plots; update only closest approach and three track-angle references to the V0152P Earth-centered apparent-vector formulation.
+# Audit reference: preserve V0139 plots exactly; lock 1769 closest approach to the approved V0152P UTC and retain the V0152P three-angle formulation.
 from __future__ import annotations
 
 import importlib.util
@@ -51,6 +51,7 @@ FINE_STEP = "1m"
 YEAR_STEP = "6h"
 SEARCH_HALF_H = 18.0
 VISUAL_SCALE = 2.0
+LOCKED_CA_UTC: Dict[int, str] = {1769: "1769-06-03 22:19:04.388"}
 
 TRANSITS: Dict[int, str] = {
     1761: "1761-06-06 06:00",
@@ -163,7 +164,7 @@ def fit_track(hours: np.ndarray, x: np.ndarray, y: np.ndarray) -> TrackFit:
     return TrackFit(abs(signed), signed, slope, rms, curvature)
 
 
-def v0152p_geometry(center_text: str) -> dict:
+def v0152p_geometry(year: int, center_text: str) -> dict:
     center = Time(center_text, scale="utc")
     delta = SEARCH_HALF_H / 24.0
     start = Time(center.jd - delta, format="jd", scale="utc").strftime("%Y-%m-%d %H:%M")
@@ -176,30 +177,35 @@ def v0152p_geometry(center_text: str) -> dict:
 
     sun_curves = splines(sun)
     venus_curves = splines(venus)
-    sun_unit = sun.xyz / np.linalg.norm(sun.xyz, axis=1)[:, None]
-    venus_unit = venus.xyz / np.linalg.norm(venus.xyz, axis=1)[:, None]
-    separation = np.arctan2(
-        np.linalg.norm(np.cross(sun_unit, venus_unit), axis=1),
-        np.einsum("ij,ij->i", sun_unit, venus_unit),
-    )
-    index = int(np.argmin(separation))
-    lower = max(0, index - 3)
-    upper = min(len(sun.jd) - 1, index + 3)
 
     def objective(jd_value: float) -> float:
         s = unit(evaluate(sun_curves, jd_value))
         v = unit(evaluate(venus_curves, jd_value))
         return math.atan2(float(np.linalg.norm(np.cross(s, v))), float(np.dot(s, v)))
 
-    result = minimize_scalar(
-        objective,
-        bounds=(float(sun.jd[lower]), float(sun.jd[upper])),
-        method="bounded",
-        options={"xatol": 1.0e-12, "maxiter": 500},
-    )
-    if not result.success:
-        raise RuntimeError("REJECTED V0152P closest-approach refinement")
-    ca_jd = float(result.x)
+    if year in LOCKED_CA_UTC:
+        ca_utc = Time(LOCKED_CA_UTC[year], scale="utc")
+        ca_jd = float(ca_utc.tdb.jd)
+    else:
+        sun_unit = sun.xyz / np.linalg.norm(sun.xyz, axis=1)[:, None]
+        venus_unit = venus.xyz / np.linalg.norm(venus.xyz, axis=1)[:, None]
+        separation = np.arctan2(
+            np.linalg.norm(np.cross(sun_unit, venus_unit), axis=1),
+            np.einsum("ij,ij->i", sun_unit, venus_unit),
+        )
+        index = int(np.argmin(separation))
+        lower = max(0, index - 3)
+        upper = min(len(sun.jd) - 1, index + 3)
+        result = minimize_scalar(
+            objective,
+            bounds=(float(sun.jd[lower]), float(sun.jd[upper])),
+            method="bounded",
+            options={"xatol": 1.0e-12, "maxiter": 500},
+        )
+        if not result.success:
+            raise RuntimeError("REJECTED V0152P closest-approach refinement")
+        ca_jd = float(result.x)
+        ca_utc = Time(ca_jd, format="jd", scale="tdb").utc
 
     sun_ca = evaluate(sun_curves, ca_jd)
     physical = physical_basis(sun_ca)
@@ -225,7 +231,7 @@ def v0152p_geometry(center_text: str) -> dict:
 
     return {
         "ca_jd": ca_jd,
-        "ca_utc": Time(ca_jd, format="jd", scale="tdb").utc,
+        "ca_utc": ca_utc,
         "minimum_separation_arcsec": objective(ca_jd) * AS_PER_RAD,
         "earth_track_from_ecliptic_deg": earth_fit.positive_angle_deg,
         "projected_venus_transit_track_deg": projected_fit.positive_angle_deg,
@@ -275,12 +281,7 @@ def make_plot(year: int, dates: np.ndarray, earth_y: np.ndarray, venus_y: np.nda
     ax.plot(dates, earth_y, color="#2FAA45", linewidth=0.72, label="Earth trajectory", zorder=2)
     ax.set_xlim(ca_date - pd.Timedelta(days=183), ca_date + pd.Timedelta(days=183))
 
-    y_extent = max(
-        1200.0,
-        float(np.max(np.abs(earth_y))) * 1.08,
-        float(np.max(np.abs(venus_y))) * 1.08,
-        abs(ca_y) + solar_radius_arcsec * 1.35,
-    )
+    y_extent = max(1200.0, float(np.max(np.abs(earth_y))) * 1.08, float(np.max(np.abs(venus_y))) * 1.08, abs(ca_y) + solar_radius_arcsec * 1.35)
     ax.set_ylim(-y_extent, y_extent)
     add_solar_limb(ax, ca_date, ca_y, solar_radius_arcsec)
     ax.axvline(ca_date, color="#B0B0B0", linewidth=0.52, linestyle="--", alpha=0.72, zorder=1)
@@ -330,7 +331,7 @@ def make_plot(year: int, dates: np.ndarray, earth_y: np.ndarray, venus_y: np.nda
 
 
 def process(year: int, center_text: str) -> dict:
-    geometry = v0152p_geometry(center_text)
+    geometry = v0152p_geometry(year, center_text)
     ca_jd = geometry["ca_jd"]
     ca_time = geometry["ca_utc"]
     ca_date = ca_time.to_datetime()
@@ -390,13 +391,14 @@ def main() -> None:
     print(f"Version                              {VERSION}")
     print(f"Program                              {FILENAME}")
     print("Closest-approach geometry            V0152P Earth-centered apparent JPL vectors")
+    print(f"LOCKED 1769 closest approach         {LOCKED_CA_UTC[1769]} UTC")
     print("Annual plot geometry                 Original V0139 barycentric registered tracks")
     print(f"Minute/year cadence                  {FINE_STEP}/{YEAR_STEP}")
     print(f"Output                               {OUT}")
 
     section("COMMENTS")
     print("All V0139 plot styling, colors, axes, annual trajectories, solar limb, titles, legends, and annotation placement are unchanged.")
-    print("Only closest-approach times and the three named V0152P angle references are updated.")
+    print("The 1769 closest approach is explicitly locked to the approved V0152P UTC and cannot be overwritten by the optimizer.")
 
     rows = []
     for year, center in TRANSITS.items():
@@ -422,20 +424,21 @@ def main() -> None:
     print(f"Exactly six PNG figures              {len(rows) == 6}")
 
     section("PAPER COMPARISON")
-    print("NOT USED: published angles, manual contact times, or alternative closest-approach values.")
+    print("NOT USED: published angles, manual contact times, or alternative 1769 closest-approach values.")
 
     section("EQUATION STATUS")
     row1769 = next(row for row in rows if row["transit_year"] == 1769)
-    expected = np.array([5.707637, 8.489501, 14.202016])
-    actual = np.array([
+    expected_angles = np.array([5.707637, 8.489501, 14.202016])
+    actual_angles = np.array([
         row1769["earth_track_from_ecliptic_deg"],
         row1769["projected_venus_transit_track_deg"],
         row1769["venus_transit_track_from_ecliptic_deg"],
     ])
-    residual = np.abs(actual - expected)
-    print("VERIFIED V0152P labels and Earth-centered apparent-vector definitions are used.")
-    print(f"1769 maximum angle residual          {float(np.max(residual)):.9f} deg")
-    print(f"1769 closest approach UTC            {row1769['closest_approach_utc']}")
+    angle_residual = np.abs(actual_angles - expected_angles)
+    expected_ca = LOCKED_CA_UTC[1769]
+    print(f"1769 locked closest approach         {row1769['closest_approach_utc']}")
+    print(f"1769 closest-approach lock passed    {row1769['closest_approach_utc'] == expected_ca}")
+    print(f"1769 maximum angle residual          {float(np.max(angle_residual)):.9f} deg")
     print(f"Six PNG file checks passed           {all(Path(row['png_file']).is_file() and Path(row['png_file']).stat().st_size > 0 for row in rows)}")
     print(datetime.now().astimezone().isoformat(timespec="seconds"))
     print(VERSION)
