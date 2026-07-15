@@ -197,7 +197,7 @@ def main() -> None:
     print(f"Local curved segment                 ±{LOCAL_HALF_MINUTES:.0f} minutes")
     print("COMMENTS")
     print("Closest approach is the raw central-difference d rho/dt zero from the V0102C geometry.")
-    print("Only the local ±30-minute projected Venus-Sun track is plotted; no rho circle is drawn.")
+    print("Only the local ±30-minute projected Venus-Sun parabola is plotted; no rho circle is drawn.")
 
     sun_jd, sun_xyz = query_vectors("10", start, stop)
     venus_jd, venus_xyz = query_vectors("299", start, stop)
@@ -253,6 +253,11 @@ def main() -> None:
     projected_angle, projected_slope, projected_rms, projected_curv = fit_angle(rel_x, rel_y, minutes)
     venus_angle, venus_slope, venus_rms, venus_curv = fit_angle(physical_rel_x, physical_rel_y, minutes)
 
+    fit_x = np.polyfit(minutes, rel_x, 2)
+    fit_y = np.polyfit(minutes, rel_y, 2)
+    parabola_x = np.polyval(fit_x, minutes)
+    parabola_y = np.polyval(fit_y, minutes)
+
     fig, ax = plt.subplots(figsize=(10.5, 10.5), dpi=120)
     fig.patch.set_facecolor("black")
     ax.set_facecolor("black")
@@ -261,35 +266,33 @@ def main() -> None:
     ax.plot([-extent_cross, extent_cross], [0.0, 0.0], color="#000000", linewidth=0.72, zorder=2)
     ax.plot([0.0, 0.0], [-extent_cross, extent_cross], color="#000000", linewidth=0.72, zorder=2)
 
-    ax.plot(rel_x, rel_y, color="#F5F5F5", linewidth=1.10, zorder=6, label="Projected Venus Transit Track ±30 min")
-    ax.scatter(rel_x[::8], rel_y[::8], s=5, color="#F5F5F5", zorder=6)
-    ax.scatter([ca_x], [ca_y], s=34, facecolor="#42D7C3", edgecolor="white", linewidth=0.55, zorder=9, label="dρ/dt = 0 closest approach")
-    ax.add_patch(Circle((ca_x, ca_y), venus_radius, facecolor="none", edgecolor="white", linewidth=0.65, zorder=8))
-
-    tangent = np.polyfit(minutes, rel_y, 2)
-    local_model = np.polyval(tangent, minutes)
-    ax.plot(rel_x, local_model, color="#42D7C3", linewidth=0.72, linestyle="--", zorder=7, label="Local quadratic curvature fit")
+    ax.plot(parabola_x, parabola_y, color="#FF2020", linewidth=4.8, alpha=0.18, solid_capstyle="round", zorder=6)
+    ax.plot(parabola_x, parabola_y, color="#FF3030", linewidth=1.85, alpha=0.98, solid_capstyle="round", zorder=7, label="ρ parabola: ±30 min about CA")
+    ax.scatter(parabola_x[::8], parabola_y[::8], s=7, color="#FF3030", zorder=8)
+    ax.scatter([ca_x], [ca_y], s=78, facecolor="#FF3030", edgecolor="#FFF0F0", linewidth=0.85, zorder=10, label="dρ/dt = 0 closest-approach vertex")
+    ax.add_patch(Circle((ca_x, ca_y), venus_radius, facecolor="none", edgecolor="#FFF0F0", linewidth=0.75, zorder=9))
 
     box_lines = [
-        TextArea(f"Closest Approach (UTC): {Time(jd_ca, format='jd', scale='tdb').utc.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}", textprops={"color":"#F5F5F5","fontsize":9.6}),
-        TextArea(f"ρ at CA: {rho_ca:.9f} arcsec", textprops={"color":"#42D7C3","fontsize":9.6}),
-        TextArea("Local track window: ±30.000 min", textprops={"color":"#F5F5F5","fontsize":9.6}),
+        TextArea(f"Closest Approach (UTC): {Time(jd_ca, format='jd', scale='tdb').utc.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}", textprops={"color":"#FF4A4A","fontsize":9.8,"fontweight":"bold"}),
+        TextArea(f"ρ at CA: {rho_ca:.9f} arcsec", textprops={"color":"#FF4A4A","fontsize":9.6}),
+        TextArea("Local parabola window: ±30.000 min", textprops={"color":"#FFB0B0","fontsize":9.6}),
         TextArea(f"Projected Track Angle: {projected_angle:.6f}°", textprops={"color":"#F5F5F5","fontsize":9.6}),
-        TextArea(f"Projected Curvature: {projected_curv:.12e} arcsec⁻¹", textprops={"color":"#42D7C3","fontsize":9.6}),
+        TextArea(f"Projected Curvature: {projected_curv:.12e} arcsec⁻¹", textprops={"color":"#FF4A4A","fontsize":9.6}),
         TextArea("Ecliptic Reference: 0.000°", textprops={"color":"#000000","fontsize":9.6}),
     ]
     packed = VPacker(children=box_lines, align="left", pad=0.0, sep=2.0)
     angle_box = AnchoredOffsetbox(loc="upper right", child=packed, pad=0.45, frameon=True, borderpad=0.45)
     angle_box.patch.set_facecolor("#050505")
-    angle_box.patch.set_edgecolor("#858585")
-    angle_box.patch.set_alpha(0.94)
+    angle_box.patch.set_edgecolor("#FF3030")
+    angle_box.patch.set_linewidth(0.85)
+    angle_box.patch.set_alpha(0.95)
     ax.add_artist(angle_box)
 
     extent = 1.10 * sun_radius
     ax.set_xlim(-extent, extent)
     ax.set_ylim(-extent, extent)
     ax.set_aspect("equal", adjustable="box")
-    ax.set_title("1769 Venus Transit — Ecliptic Crosshair and Local Closest-Approach Curvature", color="#F4F4F4", fontsize=14.5, weight="bold", pad=10)
+    ax.set_title("1769 Venus Transit — Ecliptic Crosshair and Local Closest-Approach Parabola", color="#F4F4F4", fontsize=14.5, weight="bold", pad=10)
     ax.set_xlabel("Registered tangent-plane X (arcsec)", color="#E4E4E4")
     ax.set_ylabel("Registered tangent-plane Y (arcsec)", color="#E4E4E4")
     ax.tick_params(colors="#D8D8D8", labelsize=9, width=0.5)
@@ -323,7 +326,7 @@ def main() -> None:
     print("PAPER COMPARISON")
     print("NOT USED: JPL-only internal geometry audit.")
     print("EQUATION STATUS")
-    print("PASS: CA is the root of the same geometric d rho/dt used by V0102C; the plotted curved segment is restricted to ±30 minutes.")
+    print("PASS: CA is the root of the same geometric d rho/dt used by V0102C; only the red quadratic ±30-minute local segment is plotted.")
     print(datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %z"))
     print(VERSION)
 
