@@ -36,19 +36,11 @@ wrapper=wrapper.replace(
     '"2012 Venus Transit — Ecliptic Reference And Transit Tracks"',
     '"1769 Venus Transit — Ecliptic Reference And Transit Tracks"')
 
-# Replace the inherited rho-min optimizer with the V0102C raw central-difference d-rho/dt root.
-needle='from scipy.optimize import minimize_scalar'
-replacement='from scipy.optimize import minimize_scalar, brentq'
-if needle not in wrapper:
-    raise RuntimeError("REJECTED scipy optimizer import marker missing")
-wrapper=wrapper.replace(needle,replacement,1)
-
 start=wrapper.index('def closest_approach(')
 end=wrapper.index('\ndef physical_east_north_basis',start)
-new_solver='''def closest_approach(\n    sun: VectorSeries,\n    venus: VectorSeries,\n) -> tuple[float, float, np.ndarray]:\n    if len(sun.jd) != len(venus.jd) or not np.allclose(sun.jd, venus.jd, atol=1.0e-11, rtol=0.0):\n        raise RuntimeError("REJECTED mismatched JPL grids")\n    sun_curves = cubic_splines(sun)\n    venus_curves = cubic_splines(venus)\n    def rho(jd_value: float) -> float:\n        su = unit(evaluate(sun_curves, jd_value))\n        vu = unit(evaluate(venus_curves, jd_value))\n        return math.atan2(float(np.linalg.norm(np.cross(su, vu))), float(np.dot(su, vu)))\n    sampled = np.array([rho(float(jd)) for jd in sun.jd], dtype=float)\n    index = int(np.argmin(sampled))\n    lo_seed = float(sun.jd[max(0,index-3)])\n    hi_seed = float(sun.jd[min(len(sun.jd)-1,index+3)])\n    seed = minimize_scalar(rho,bounds=(lo_seed,hi_seed),method="bounded",options={"xatol":1.0e-13,"maxiter":600})\n    if not seed.success:\n        raise RuntimeError("REJECTED rho-minimum seed")\n    h = 0.5 / 1440.0\n    def rhodot(jd_value: float) -> float:\n        return rho(jd_value+h)-rho(jd_value-h)\n    lo = float(seed.x)-5.0/1440.0\n    hi = float(seed.x)+5.0/1440.0\n    if rhodot(lo)*rhodot(hi) > 0.0:\n        raise RuntimeError("REJECTED d rho/dt zero not bracketed")\n    jd_ca = float(brentq(rhodot,lo,hi,xtol=1.0e-14,rtol=1.0e-14,maxiter=200))\n    return jd_ca, rho(jd_ca), evaluate(sun_curves,jd_ca)\n\n'''
+new_solver='''def closest_approach(\n    sun: VectorSeries,\n    venus: VectorSeries,\n) -> tuple[float, float, np.ndarray]:\n    if len(sun.jd) != len(venus.jd) or not np.allclose(sun.jd, venus.jd, atol=1.0e-11, rtol=0.0):\n        raise RuntimeError("REJECTED mismatched JPL grids")\n    sun_curves = cubic_splines(sun)\n    venus_curves = cubic_splines(venus)\n    def rho(jd_value: float) -> float:\n        su = unit(evaluate(sun_curves, jd_value))\n        vu = unit(evaluate(venus_curves, jd_value))\n        return math.atan2(float(np.linalg.norm(np.cross(su, vu))), float(np.dot(su, vu)))\n    sampled = np.array([rho(float(jd)) for jd in sun.jd], dtype=float)\n    index = int(np.argmin(sampled))\n    lo_seed = float(sun.jd[max(0,index-3)])\n    hi_seed = float(sun.jd[min(len(sun.jd)-1,index+3)])\n    seed = minimize_scalar(rho,bounds=(lo_seed,hi_seed),method="bounded",options={"xatol":1.0e-13,"maxiter":600})\n    if not seed.success:\n        raise RuntimeError("REJECTED rho-minimum seed")\n    h = 0.5 / 1440.0\n    def rhodot(jd_value: float) -> float:\n        return rho(jd_value+h)-rho(jd_value-h)\n    lo = float(seed.x)-5.0/1440.0\n    hi = float(seed.x)+5.0/1440.0\n    flo = rhodot(lo)\n    fhi = rhodot(hi)\n    if flo*fhi > 0.0:\n        raise RuntimeError("REJECTED d rho/dt zero not bracketed")\n    for _ in range(120):\n        mid = 0.5*(lo+hi)\n        fmid = rhodot(mid)\n        if flo*fmid <= 0.0:\n            hi = mid\n            fhi = fmid\n        else:\n            lo = mid\n            flo = fmid\n    jd_ca = 0.5*(lo+hi)\n    return jd_ca, rho(jd_ca), evaluate(sun_curves,jd_ca)\n\n'''
 wrapper=wrapper[:start]+new_solver+wrapper[end+1:]
 
-# Evaluate the exact CA point, not the nearest one-minute row.
 old='''    index_ca = int(np.argmin(np.abs(sun.jd - jd_ca)))
     ca_x = float(relative_x_projected[index_ca])
     ca_y = float(relative_y_projected[index_ca])
@@ -75,7 +67,6 @@ if old not in wrapper:
     raise RuntimeError("REJECTED exact-CA coordinate marker missing")
 wrapper=wrapper.replace(old,new,1)
 
-# Overlay rho as a thin circle centered on the Sun and passing through the CA vertex.
 anchor='''    ax.scatter(
         [ca_x],
         [ca_y],'''
@@ -111,7 +102,7 @@ wrapper=wrapper.replace(old_line,new_lines,1)
 
 if wrapper.splitlines()[0]!="# V0152" or wrapper.splitlines()[-1]!="# V0152":
     raise RuntimeError("REJECTED version boundary")
-for marker in ['YEAR = 1769','CENTER_UTC = "1769-06-03 22:00"','brentq','rho at CA','rho_ca_arcsec','Closest Approach (UTC)','Ecliptic Reference']:
+for marker in ['YEAR = 1769','CENTER_UTC = "1769-06-03 22:00"','rho at CA','rho_ca_arcsec','Closest Approach (UTC)','Ecliptic Reference']:
     if marker not in wrapper:
         raise RuntimeError(f"REJECTED final marker missing: {marker}")
 
