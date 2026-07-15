@@ -23,11 +23,15 @@ for marker in required:
 
 wrapper=wrapper.replace("# V0150","# V0151")
 wrapper=wrapper.replace("V0150","V0151")
-wrapper=wrapper.replace(
-    '        TextArea("Ecliptic Reference: 0.000°", textprops={"color":"#000000","fontsize":9.6}),',
-    '        TextArea(f"Closest Approach (UTC): {Time(jd_ca, format=\"jd\", scale=\"tdb\").utc.strftime(\"%Y-%m-%d %H:%M:%S\")}", textprops={"color":"#F5F5F5","fontsize":9.6}),\n'
-    '        TextArea("Ecliptic Reference: 0.000°", textprops={"color":"#000000","fontsize":9.6}),'
+old_line='        TextArea("Ecliptic Reference: 0.000°", textprops={"color":"#000000","fontsize":9.6}),' 
+new_lines=(
+    '        TextArea(f"Closest Approach (UTC): {Time(jd_ca, format=\'jd\', scale=\'tdb\').utc.strftime(\'%Y-%m-%d %H:%M:%S\')}", '
+    'textprops={"color":"#F5F5F5","fontsize":9.6}),\n'
+    + old_line
 )
+if old_line not in wrapper:
+    raise RuntimeError("REJECTED V0150 angle-box insertion marker missing")
+wrapper=wrapper.replace(old_line,new_lines,1)
 
 if 'Closest Approach (UTC)' not in wrapper:
     raise RuntimeError("REJECTED closest-approach UTC line missing")
@@ -44,5 +48,6 @@ for label in [
     if label not in wrapper:
         raise RuntimeError(f"REJECTED missing title-case label: {label}")
 
+compile(wrapper,"VENUS_TRANSIT_2012_ECLIPTIC_CROSSHAIR_V0151_WRAPPER.py","exec")
 exec(compile(wrapper,"VENUS_TRANSIT_2012_ECLIPTIC_CROSSHAIR_V0151.py","exec"))
 # V0151
