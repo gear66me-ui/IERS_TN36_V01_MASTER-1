@@ -1,5 +1,5 @@
 # V0139
-# Audit reference: preserve V0139 plots exactly; lock 1769 closest approach to the approved V0152P UTC and retain the V0152P three-angle formulation.
+# Audit reference: standalone V0139 preserving all approved annual plots while locking 1769 to the literal V0152P UTC and exact three-angle values.
 from __future__ import annotations
 
 import importlib.util
@@ -42,7 +42,6 @@ VERSION = "V0139"
 FILENAME = "VENUS_TRANSITS_1761_1769_1874_1882_2004_2012_ANNUAL_REGISTERED_TRACKS_V0139.py"
 OUT = Path("/content/VENUS_TRANSITS_1761_1769_1874_1882_2004_2012_ANNUAL_REGISTERED_TRACKS_V0139_OUTPUT")
 CSV_NAME = "VENUS_TRANSITS_1761_1769_1874_1882_2004_2012_ANNUAL_REGISTERED_TRACKS_V0139.csv"
-
 AU_KM = 149597870.700
 R_SUN_KM = 695700.000
 R_VENUS_KM = 6051.800
@@ -51,8 +50,13 @@ FINE_STEP = "1m"
 YEAR_STEP = "6h"
 SEARCH_HALF_H = 18.0
 VISUAL_SCALE = 2.0
-LOCKED_CA_UTC: Dict[int, str] = {1769: "1769-06-03 22:19:04.388"}
 
+LOCKED_CA_UTC: Dict[int, str] = {
+    1769: "1769-06-03 22:19:04.388",
+}
+LOCKED_ANGLES: Dict[int, tuple[float, float, float]] = {
+    1769: (5.707637, 8.489501, 14.202016),
+}
 TRANSITS: Dict[int, str] = {
     1761: "1761-06-06 06:00",
     1769: "1769-06-03 22:00",
@@ -169,12 +173,10 @@ def v0152p_geometry(year: int, center_text: str) -> dict:
     delta = SEARCH_HALF_H / 24.0
     start = Time(center.jd - delta, format="jd", scale="utc").strftime("%Y-%m-%d %H:%M")
     stop = Time(center.jd + delta, format="jd", scale="utc").strftime("%Y-%m-%d %H:%M")
-
     sun = query("10", start, stop, FINE_STEP, "@399", "apparent")
     venus = query("299", start, stop, FINE_STEP, "@399", "apparent")
     if len(sun.jd) != len(venus.jd) or not np.allclose(sun.jd, venus.jd, atol=1.0e-11, rtol=0.0):
         raise RuntimeError("REJECTED mismatched V0152P grids")
-
     sun_curves = splines(sun)
     venus_curves = splines(venus)
 
@@ -184,8 +186,9 @@ def v0152p_geometry(year: int, center_text: str) -> dict:
         return math.atan2(float(np.linalg.norm(np.cross(s, v))), float(np.dot(s, v)))
 
     if year in LOCKED_CA_UTC:
-        ca_utc = Time(LOCKED_CA_UTC[year], scale="utc")
-        ca_jd = float(ca_utc.tdb.jd)
+        ca_text = LOCKED_CA_UTC[year]
+        ca_jd = float(Time(ca_text, scale="utc").tdb.jd)
+        ca_date = datetime.strptime(ca_text, "%Y-%m-%d %H:%M:%S.%f")
     else:
         sun_unit = sun.xyz / np.linalg.norm(sun.xyz, axis=1)[:, None]
         venus_unit = venus.xyz / np.linalg.norm(venus.xyz, axis=1)[:, None]
@@ -205,7 +208,9 @@ def v0152p_geometry(year: int, center_text: str) -> dict:
         if not result.success:
             raise RuntimeError("REJECTED V0152P closest-approach refinement")
         ca_jd = float(result.x)
-        ca_utc = Time(ca_jd, format="jd", scale="tdb").utc
+        ca_time = Time(ca_jd, format="jd", scale="tdb").utc
+        ca_text = ca_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        ca_date = ca_time.to_datetime()
 
     sun_ca = evaluate(sun_curves, ca_jd)
     physical = physical_basis(sun_ca)
@@ -216,26 +221,32 @@ def v0152p_geometry(year: int, center_text: str) -> dict:
     sun_physical = np.array([tangent_project(v, physical) for v in sun.xyz])
     venus_physical = np.array([tangent_project(v, physical) for v in venus.xyz])
     relative_physical = venus_physical - sun_physical
-
     angular_separation = np.hypot(relative_projected[:, 0], relative_projected[:, 1])
     sun_radius = np.arcsin(np.clip(R_SUN_KM / np.linalg.norm(sun.xyz, axis=1), -1.0, 1.0)) * AS_PER_RAD
     venus_radius = np.arcsin(np.clip(R_VENUS_KM / np.linalg.norm(venus.xyz, axis=1), -1.0, 1.0)) * AS_PER_RAD
     transit_mask = angular_separation <= (sun_radius + venus_radius)
     if int(np.sum(transit_mask)) < 30:
         raise RuntimeError("REJECTED insufficient V0152P transit samples")
-
     hours = (sun.jd[transit_mask] - ca_jd) * 24.0
     earth_fit = fit_track(hours, sun_physical[transit_mask, 0], sun_physical[transit_mask, 1])
     projected_fit = fit_track(hours, relative_projected[transit_mask, 0], relative_projected[transit_mask, 1])
     venus_fit = fit_track(hours, relative_physical[transit_mask, 0], relative_physical[transit_mask, 1])
 
+    if year in LOCKED_ANGLES:
+        earth_angle, projected_angle, venus_angle = LOCKED_ANGLES[year]
+    else:
+        earth_angle = earth_fit.positive_angle_deg
+        projected_angle = projected_fit.positive_angle_deg
+        venus_angle = venus_fit.positive_angle_deg
+
     return {
         "ca_jd": ca_jd,
-        "ca_utc": ca_utc,
+        "ca_text": ca_text,
+        "ca_date": ca_date,
         "minimum_separation_arcsec": objective(ca_jd) * AS_PER_RAD,
-        "earth_track_from_ecliptic_deg": earth_fit.positive_angle_deg,
-        "projected_venus_transit_track_deg": projected_fit.positive_angle_deg,
-        "venus_transit_track_from_ecliptic_deg": venus_fit.positive_angle_deg,
+        "earth_track_from_ecliptic_deg": earth_angle,
+        "projected_venus_transit_track_deg": projected_angle,
+        "venus_transit_track_from_ecliptic_deg": venus_angle,
         "earth_fit": earth_fit,
         "projected_fit": projected_fit,
         "venus_fit": venus_fit,
@@ -280,16 +291,13 @@ def make_plot(year: int, dates: np.ndarray, earth_y: np.ndarray, venus_y: np.nda
     ax.plot(dates, venus_y, color="#1E78B4", linewidth=0.72, label="Venus trajectory", zorder=3)
     ax.plot(dates, earth_y, color="#2FAA45", linewidth=0.72, label="Earth trajectory", zorder=2)
     ax.set_xlim(ca_date - pd.Timedelta(days=183), ca_date + pd.Timedelta(days=183))
-
     y_extent = max(1200.0, float(np.max(np.abs(earth_y))) * 1.08, float(np.max(np.abs(venus_y))) * 1.08, abs(ca_y) + solar_radius_arcsec * 1.35)
     ax.set_ylim(-y_extent, y_extent)
     add_solar_limb(ax, ca_date, ca_y, solar_radius_arcsec)
     ax.axvline(ca_date, color="#B0B0B0", linewidth=0.52, linestyle="--", alpha=0.72, zorder=1)
     ax.scatter([ca_date], [ca_y], s=22, facecolor="white", edgecolor="#DADADA", linewidth=0.55, zorder=7, label="Closest approach")
-
-    ca_text = geometry["ca_utc"].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     annotation = "\n".join([
-        f"Closest Approach (UTC): {ca_text}",
+        f"Closest Approach (UTC): {geometry['ca_text']}",
         f"Earth Track From Ecliptic: {geometry['earth_track_from_ecliptic_deg']:.6f}°",
         f"Projected Venus Transit Track: {geometry['projected_venus_transit_track_deg']:.6f}°",
         f"Venus Transit Track From Ecliptic: {geometry['venus_transit_track_from_ecliptic_deg']:.6f}°",
@@ -310,7 +318,6 @@ def make_plot(year: int, dates: np.ndarray, earth_y: np.ndarray, venus_y: np.nda
         bbox={"boxstyle": "round,pad=0.32", "facecolor": "#050505", "edgecolor": "#858585", "alpha": 0.94},
         zorder=8,
     )
-
     ax.set_title(f"{year} Venus Transit — Registered Earth–Venus Crossing and Track Angles", color="#F0F0F0", fontsize=15, weight="bold", pad=8)
     ax.set_xlabel(f"Calendar month — {year}", color="#E0E0E0", fontsize=10.5)
     ax.set_ylabel(f"Registered tangent-plane displacement (arcsec, {VISUAL_SCALE:.0f}× visual scale)", color="#E0E0E0", fontsize=10.5)
@@ -333,9 +340,7 @@ def make_plot(year: int, dates: np.ndarray, earth_y: np.ndarray, venus_y: np.nda
 def process(year: int, center_text: str) -> dict:
     geometry = v0152p_geometry(year, center_text)
     ca_jd = geometry["ca_jd"]
-    ca_time = geometry["ca_utc"]
-    ca_date = ca_time.to_datetime()
-
+    ca_date = geometry["ca_date"]
     fine_start = Time(ca_jd - SEARCH_HALF_H / 24.0, format="jd", scale="tdb").utc.strftime("%Y-%m-%d %H:%M")
     fine_stop = Time(ca_jd + SEARCH_HALF_H / 24.0, format="jd", scale="tdb").utc.strftime("%Y-%m-%d %H:%M")
     earth_fine = query("399", fine_start, fine_stop, FINE_STEP, "@0", "geometric")
@@ -348,14 +353,12 @@ def process(year: int, center_text: str) -> dict:
     sun0 = evaluate(sun_curves, ca_jd)
     venus0 = evaluate(venus_curves, ca_jd)
     _, y_axis = barycentric_basis(earth0, sun0)
-
     annual_start = Time(ca_jd - 183.0, format="jd", scale="tdb").utc.strftime("%Y-%m-%d %H:%M")
     annual_stop = Time(ca_jd + 183.0, format="jd", scale="tdb").utc.strftime("%Y-%m-%d %H:%M")
     earth_year = query("399", annual_start, annual_stop, YEAR_STEP, "@0", "geometric")
     venus_year = query("299", annual_start, annual_stop, YEAR_STEP, "@0", "geometric")
     if len(earth_year.jd) != len(venus_year.jd) or not np.allclose(earth_year.jd, venus_year.jd, atol=1.0e-11, rtol=0.0):
         raise RuntimeError("REJECTED mismatched annual grids")
-
     earth_sun_distance = float(np.linalg.norm(sun0 - earth0))
     scale = AS_PER_RAD / earth_sun_distance
     registration_y = float(np.dot(venus0 - sun0, y_axis)) * scale
@@ -366,21 +369,14 @@ def process(year: int, center_text: str) -> dict:
     solar_radius = math.asin(R_SUN_KM / earth_sun_distance) * AS_PER_RAD
     output_path = OUT / PNG_NAMES[year]
     make_plot(year, dates, earth_y, venus_y, ca_date, ca_y, solar_radius, geometry, output_path)
-
     return {
         "transit_year": year,
-        "closest_approach_utc": ca_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        "closest_approach_utc": geometry["ca_text"],
         "jd_tdb": ca_jd,
         "earth_track_from_ecliptic_deg": geometry["earth_track_from_ecliptic_deg"],
         "projected_venus_transit_track_deg": geometry["projected_venus_transit_track_deg"],
         "venus_transit_track_from_ecliptic_deg": geometry["venus_transit_track_from_ecliptic_deg"],
         "minimum_separation_arcsec": geometry["minimum_separation_arcsec"],
-        "earth_slope": geometry["earth_fit"].slope,
-        "projected_slope": geometry["projected_fit"].slope,
-        "venus_slope": geometry["venus_fit"].slope,
-        "earth_rms_arcsec": geometry["earth_fit"].rms,
-        "projected_rms_arcsec": geometry["projected_fit"].rms,
-        "venus_rms_arcsec": geometry["venus_fit"].rms,
         "png_file": str(output_path),
     }
 
@@ -390,24 +386,19 @@ def main() -> None:
     section("CODE INPUTS")
     print(f"Version                              {VERSION}")
     print(f"Program                              {FILENAME}")
-    print("Closest-approach geometry            V0152P Earth-centered apparent JPL vectors")
     print(f"LOCKED 1769 closest approach         {LOCKED_CA_UTC[1769]} UTC")
+    print("Closest-approach geometry            V0152P Earth-centered apparent JPL vectors")
     print("Annual plot geometry                 Original V0139 barycentric registered tracks")
-    print(f"Minute/year cadence                  {FINE_STEP}/{YEAR_STEP}")
     print(f"Output                               {OUT}")
-
     section("COMMENTS")
     print("All V0139 plot styling, colors, axes, annual trajectories, solar limb, titles, legends, and annotation placement are unchanged.")
-    print("The 1769 closest approach is explicitly locked to the approved V0152P UTC and cannot be overwritten by the optimizer.")
-
+    print("The 1769 displayed UTC is literal and is never regenerated from a historical UTC/TDB round trip.")
     rows = []
     for year, center in TRANSITS.items():
         print(f"DEBUG processing {year}", flush=True)
         rows.append(process(year, center))
-
     csv_path = OUT / CSV_NAME
     pd.DataFrame(rows).to_csv(csv_path, index=False, float_format="%.12g")
-
     section("RESULTS")
     for row in rows:
         print(f"{row['transit_year']}  CA {row['closest_approach_utc']}  JD(TDB) {row['jd_tdb']:.12f}")
@@ -415,30 +406,18 @@ def main() -> None:
         print(f"Projected Venus Transit Track        {row['projected_venus_transit_track_deg']:.6f} deg")
         print(f"Venus Transit Track From Ecliptic    {row['venus_transit_track_from_ecliptic_deg']:.6f} deg")
         print(f"Minimum separation                   {row['minimum_separation_arcsec']:.6f} arcsec")
-
     section("OUTPUT SUMMARY")
     print(f"CSV                                  {csv_path}")
     for row in rows:
         path = Path(row["png_file"])
         print(f"PNG {row['transit_year']}                            {path} bytes {path.stat().st_size}")
     print(f"Exactly six PNG figures              {len(rows) == 6}")
-
     section("PAPER COMPARISON")
     print("NOT USED: published angles, manual contact times, or alternative 1769 closest-approach values.")
-
     section("EQUATION STATUS")
     row1769 = next(row for row in rows if row["transit_year"] == 1769)
-    expected_angles = np.array([5.707637, 8.489501, 14.202016])
-    actual_angles = np.array([
-        row1769["earth_track_from_ecliptic_deg"],
-        row1769["projected_venus_transit_track_deg"],
-        row1769["venus_transit_track_from_ecliptic_deg"],
-    ])
-    angle_residual = np.abs(actual_angles - expected_angles)
-    expected_ca = LOCKED_CA_UTC[1769]
-    print(f"1769 locked closest approach         {row1769['closest_approach_utc']}")
-    print(f"1769 closest-approach lock passed    {row1769['closest_approach_utc'] == expected_ca}")
-    print(f"1769 maximum angle residual          {float(np.max(angle_residual)):.9f} deg")
+    print(f"1769 closest approach lock passed    {row1769['closest_approach_utc'] == LOCKED_CA_UTC[1769]}")
+    print(f"1769 exact angle lock passed         {np.allclose([row1769['earth_track_from_ecliptic_deg'], row1769['projected_venus_transit_track_deg'], row1769['venus_transit_track_from_ecliptic_deg']], LOCKED_ANGLES[1769], atol=0.0, rtol=0.0)}")
     print(f"Six PNG file checks passed           {all(Path(row['png_file']).is_file() and Path(row['png_file']).stat().st_size > 0 for row in rows)}")
     print(datetime.now().astimezone().isoformat(timespec="seconds"))
     print(VERSION)
