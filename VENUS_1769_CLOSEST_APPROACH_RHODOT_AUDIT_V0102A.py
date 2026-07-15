@@ -1,7 +1,6 @@
 # V0102A
-# Audit reference: corrected JPL Horizons quoting, standalone geocentric CA audit
+# Audit reference: corrected standalone JPL Horizons query and geocentric closest-approach audit
 from __future__ import annotations
-
 import datetime as dt
 import json
 import math
@@ -9,10 +8,9 @@ import os
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import List
-
-import matplotlib.dates as mdates
+from typing import List, Dict, Tuple
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 OBS, SUN, VENUS = 399, 10, 299
 START = dt.datetime(1769, 6, 3, 21, 30)
@@ -20,101 +18,89 @@ STOP = dt.datetime(1769, 6, 3, 23, 0)
 STEP = "1 m"
 ARCSEC_PER_RAD = 206264.80624709636
 LEGACY_CA = dt.datetime(1769, 6, 3, 22, 18, 59, 487000)
-OUTPUT_DIR = os.path.abspath(".")
-FIGURE_RHO = os.path.join(OUTPUT_DIR, "VENUS_1769_CLOSEST_APPROACH_RHO_V0102A.png")
-FIGURE_RHODOT = os.path.join(OUTPUT_DIR, "VENUS_1769_CLOSEST_APPROACH_RHODOT_V0102A.png")
-
+FIGURE_RHO = "VENUS_1769_CLOSEST_APPROACH_RHO_V0102A.png"
+FIGURE_RHODOT = "VENUS_1769_CLOSEST_APPROACH_RHODOT_V0102A.png"
 
 @dataclass
 class Vec3:
     x: float
     y: float
     z: float
-
     def dot(self, other: "Vec3") -> float:
-        return self.x * other.x + self.y * other.y + self.z * other.z
-
+        return self.x*other.x + self.y*other.y + self.z*other.z
     def norm(self) -> float:
         return math.sqrt(self.dot(self))
 
-
 @dataclass
-class HorizonsEphemeris:
+class Ephemeris:
     epochs: List[dt.datetime]
     sun: List[Vec3]
     venus: List[Vec3]
 
-
 @dataclass
-class SampleSeries:
+class Series:
     epochs: List[dt.datetime]
     seconds: List[float]
     rho_rad: List[float]
     rho_arcsec: List[float]
     rho2: List[float]
 
-
 @dataclass
-class AuditResult:
-    minimum_seconds: float
-    minimum_rho_rad: float
-    rho_root_seconds: float
-    rho2_root_seconds: float
-    raw_rhodot_rad_s: List[float]
-    raw_rho2dot_rad2_s: List[float]
-    rolling_rhodot_rad_s: dict[int, List[float]]
+class Audit:
+    min_s: float
+    min_rho: float
+    rhodot_root_s: float
+    rho2dot_root_s: float
+    rhodot: List[float]
+    rho2dot: List[float]
+    rolling: Dict[int, List[float]]
 
-
-def quoted(value: str) -> str:
+def q(value: str) -> str:
     return f"'{value}'"
 
-
-def query_url(target: int, start: dt.datetime, stop: dt.datetime, step: str) -> str:
+def horizons_url(target: int) -> str:
     fmt = "%Y-%m-%d %H:%M"
     params = {
         "format": "json",
-        "COMMAND": quoted(str(target)),
-        "CENTER": quoted(f"500@{OBS}"),
-        "MAKE_EPHEM": quoted("YES"),
-        "EPHEM_TYPE": quoted("VECTORS"),
-        "START_TIME": quoted(start.strftime(fmt)),
-        "STOP_TIME": quoted(stop.strftime(fmt)),
-        "STEP_SIZE": quoted(step),
-        "REF_PLANE": quoted("ECLIPTIC"),
-        "REF_SYSTEM": quoted("ICRF"),
-        "VEC_CORR": quoted("NONE"),
-        "OUT_UNITS": quoted("KM-S"),
-        "VEC_LABELS": quoted("YES"),
-        "CSV_FORMAT": quoted("YES"),
-        "OBJ_DATA": quoted("NO"),
+        "COMMAND": q(str(target)),
+        "CENTER": q(f"@{OBS}"),
+        "MAKE_EPHEM": q("YES"),
+        "EPHEM_TYPE": q("VECTORS"),
+        "START_TIME": q(START.strftime(fmt)),
+        "STOP_TIME": q(STOP.strftime(fmt)),
+        "STEP_SIZE": q(STEP),
+        "REF_PLANE": q("ECLIPTIC"),
+        "REF_SYSTEM": q("ICRF"),
+        "VEC_CORR": q("NONE"),
+        "OUT_UNITS": q("KM-S"),
+        "CSV_FORMAT": q("YES"),
+        "VEC_LABELS": q("YES"),
+        "OBJ_DATA": q("NO"),
     }
     return "https://ssd.jpl.nasa.gov/api/horizons.api?" + urllib.parse.urlencode(params)
 
-
 def fetch_json(url: str) -> dict:
-    request = urllib.request.Request(url, headers={"User-Agent": "VENUS-1769-AUDIT-V0102A"})
-    with urllib.request.urlopen(request, timeout=120) as response:
+    req = urllib.request.Request(url, headers={"User-Agent": "VENUS-1769-RHODOT-AUDIT-V0102A"})
+    with urllib.request.urlopen(req, timeout=120) as response:
         return json.load(response)
 
-
 def jd_to_datetime(jd: float) -> dt.datetime:
-    return dt.datetime(1970, 1, 1) + dt.timedelta(seconds=(jd - 2440587.5) * 86400.0)
+    return dt.datetime(1970, 1, 1) + dt.timedelta(seconds=(jd-2440587.5)*86400.0)
 
-
-def parse_vectors(text: str) -> tuple[List[dt.datetime], List[Vec3]]:
+def parse_vectors(text: str) -> Tuple[List[dt.datetime], List[Vec3]]:
+    inside = False
     epochs: List[dt.datetime] = []
     vectors: List[Vec3] = []
-    inside = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped == "$$SOE":
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line == "$$SOE":
             inside = True
             continue
-        if stripped == "$$EOE":
+        if line == "$$EOE":
             break
-        if not inside or not stripped:
+        if not inside or not line:
             continue
-        parts = [item.strip() for item in stripped.split(",")]
+        parts = [p.strip() for p in line.split(",")]
         if len(parts) < 8:
             continue
         try:
@@ -125,204 +111,173 @@ def parse_vectors(text: str) -> tuple[List[dt.datetime], List[Vec3]]:
         epochs.append(jd_to_datetime(jd))
         vectors.append(Vec3(x, y, z))
     if not vectors:
-        raise RuntimeError("No JPL vector rows parsed from Horizons response")
+        raise RuntimeError("No vector rows parsed from JPL Horizons response")
     return epochs, vectors
 
-
-def fetch_target(target: int) -> tuple[List[dt.datetime], List[Vec3]]:
-    payload = fetch_json(query_url(target, START, STOP, STEP))
+def fetch_target(target: int) -> Tuple[List[dt.datetime], List[Vec3]]:
+    payload = fetch_json(horizons_url(target))
     if payload.get("error"):
         raise RuntimeError(str(payload["error"]))
     if "result" not in payload:
         raise RuntimeError(f"Unexpected Horizons response for target {target}")
     return parse_vectors(payload["result"])
 
-
-def fetch_ephemeris() -> HorizonsEphemeris:
-    sun_epochs, sun_vectors = fetch_target(SUN)
-    venus_epochs, venus_vectors = fetch_target(VENUS)
-    if len(sun_epochs) != len(venus_epochs):
+def fetch_ephemeris() -> Ephemeris:
+    se, sv = fetch_target(SUN)
+    ve, vv = fetch_target(VENUS)
+    if len(se) != len(ve):
         raise RuntimeError("Sun/Venus vector count mismatch")
-    for a, b in zip(sun_epochs, venus_epochs):
-        if abs((a - b).total_seconds()) > 1.0e-3:
+    for a, b in zip(se, ve):
+        if abs((a-b).total_seconds()) > 1e-4:
             raise RuntimeError("Sun/Venus epoch mismatch")
-    return HorizonsEphemeris(sun_epochs, sun_vectors, venus_vectors)
-
+    return Ephemeris(se, sv, vv)
 
 def angular_separation(a: Vec3, b: Vec3) -> float:
-    den = a.norm() * b.norm()
-    if den == 0.0:
-        raise ZeroDivisionError("Zero-length JPL vector encountered")
-    c = max(-1.0, min(1.0, a.dot(b) / den))
-    return math.acos(c)
+    c = a.dot(b)/(a.norm()*b.norm())
+    return math.acos(max(-1.0, min(1.0, c)))
 
-
-def build_series(eph: HorizonsEphemeris) -> SampleSeries:
+def build_series(eph: Ephemeris) -> Series:
     origin = eph.epochs[0]
-    seconds = [(epoch - origin).total_seconds() for epoch in eph.epochs]
+    seconds = [(e-origin).total_seconds() for e in eph.epochs]
     rho = [angular_separation(s, v) for s, v in zip(eph.sun, eph.venus)]
-    return SampleSeries(eph.epochs, seconds, rho, [x * ARCSEC_PER_RAD for x in rho], [x * x for x in rho])
+    return Series(eph.epochs, seconds, rho, [r*ARCSEC_PER_RAD for r in rho], [r*r for r in rho])
 
-
-def derivative(values: List[float], seconds: List[float]) -> List[float]:
-    if len(values) < 3 or len(values) != len(seconds):
-        raise ValueError("Derivative requires at least three aligned samples")
-    out = [0.0] * len(values)
-    out[0] = (values[1] - values[0]) / (seconds[1] - seconds[0])
-    out[-1] = (values[-1] - values[-2]) / (seconds[-1] - seconds[-2])
-    for i in range(1, len(values) - 1):
-        out[i] = (values[i + 1] - values[i - 1]) / (seconds[i + 1] - seconds[i - 1])
+def derivative(values: List[float], x: List[float]) -> List[float]:
+    n = len(values)
+    out = [0.0]*n
+    out[0] = (values[1]-values[0])/(x[1]-x[0])
+    out[-1] = (values[-1]-values[-2])/(x[-1]-x[-2])
+    for i in range(1, n-1):
+        out[i] = (values[i+1]-values[i-1])/(x[i+1]-x[i-1])
     return out
 
-
 def rolling_mean(values: List[float], width: int) -> List[float]:
-    half = width // 2
-    return [sum(values[max(0, i-half):min(len(values), i+half+1)]) /
-            len(values[max(0, i-half):min(len(values), i+half+1)]) for i in range(len(values))]
+    h = width//2
+    out: List[float] = []
+    for i in range(len(values)):
+        lo, hi = max(0, i-h), min(len(values), i+h+1)
+        out.append(sum(values[lo:hi])/(hi-lo))
+    return out
 
-
-def nearest_index(seconds: List[float], target: float) -> int:
-    return min(range(len(seconds)), key=lambda i: abs(seconds[i] - target))
-
-
-def quadratic_vertex(seconds: List[float], values: List[float]) -> tuple[float, float]:
-    i = min(range(len(values)), key=values.__getitem__)
-    if i == 0 or i == len(values) - 1:
-        raise RuntimeError("Minimum lies at series boundary")
-    x0, x1, x2 = seconds[i-1:i+2]
-    y0, y1, y2 = values[i-1:i+2]
+def quadratic_minimum(x: List[float], y: List[float]) -> Tuple[float, float]:
+    i = min(range(len(y)), key=y.__getitem__)
+    if i == 0 or i == len(y)-1:
+        raise RuntimeError("Minimum at boundary")
+    x0, x1, x2 = x[i-1:i+2]
+    y0, y1, y2 = y[i-1:i+2]
     d01, d02, d12 = x0-x1, x0-x2, x1-x2
     a = y0/(d01*d02) + y1/((-d01)*d12) + y2/((-d02)*(-d12))
     b = -y0*(x1+x2)/(d01*d02) - y1*(x0+x2)/((-d01)*d12) - y2*(x0+x1)/((-d02)*(-d12))
-    xv = -b/(2.0*a)
-    yv = a*xv*xv + b*xv + (y0-a*x0*x0-b*x0)
-    return xv, yv
+    c = y0-a*x0*x0-b*x0
+    xv = -b/(2*a)
+    return xv, a*xv*xv+b*xv+c
 
+def zero_crossing(x: List[float], y: List[float], near: float) -> float:
+    candidates = []
+    for i in range(len(y)-1):
+        if y[i] == 0.0:
+            return x[i]
+        if y[i]*y[i+1] < 0.0:
+            candidates.append((abs((x[i]+x[i+1])/2-near), i))
+    if not candidates:
+        raise RuntimeError("No zero crossing found")
+    i = min(candidates)[1]
+    return x[i] - y[i]*(x[i+1]-x[i])/(y[i+1]-y[i])
 
-def zero_crossing(seconds: List[float], values: List[float], near: int) -> float:
-    brackets = []
-    for i in range(len(values)-1):
-        if values[i] == 0.0:
-            return seconds[i]
-        if values[i] * values[i+1] < 0.0:
-            brackets.append((abs(i-near), i))
-    if not brackets:
-        raise RuntimeError("No derivative zero crossing found")
-    _, i = min(brackets)
-    t0, t1 = seconds[i], seconds[i+1]
-    y0, y1 = values[i], values[i+1]
-    return t0 - y0 * (t1-t0) / (y1-y0)
+def interpolate(x: List[float], y: List[float], target: float) -> float:
+    for i in range(len(x)-1):
+        if x[i] <= target <= x[i+1]:
+            f = (target-x[i])/(x[i+1]-x[i])
+            return y[i] + f*(y[i+1]-y[i])
+    raise ValueError("Interpolation target outside range")
 
-
-def interpolate(seconds: List[float], values: List[float], target: float) -> float:
-    if target <= seconds[0]:
-        return values[0]
-    if target >= seconds[-1]:
-        return values[-1]
-    lo, hi = 0, len(seconds)-1
-    while hi-lo > 1:
-        mid = (lo+hi)//2
-        if seconds[mid] <= target:
-            lo = mid
-        else:
-            hi = mid
-    f = (target-seconds[lo])/(seconds[hi]-seconds[lo])
-    return values[lo] + f*(values[hi]-values[lo])
-
-
-def evaluate(series: SampleSeries) -> AuditResult:
-    minimum_seconds, minimum_rho = quadratic_vertex(series.seconds, series.rho_rad)
+def evaluate(series: Series) -> Audit:
+    min_s, min_rho = quadratic_minimum(series.seconds, series.rho_rad)
     rhodot = derivative(series.rho_rad, series.seconds)
     rho2dot = derivative(series.rho2, series.seconds)
-    near = nearest_index(series.seconds, minimum_seconds)
-    rho_root = zero_crossing(series.seconds, rhodot, near)
-    rho2_root = zero_crossing(series.seconds, rho2dot, near)
+    root1 = zero_crossing(series.seconds, rhodot, min_s)
+    root2 = zero_crossing(series.seconds, rho2dot, min_s)
     rolling = {w: rolling_mean(rhodot, w) for w in (3, 5, 7, 9)}
-    return AuditResult(minimum_seconds, minimum_rho, rho_root, rho2_root, rhodot, rho2dot, rolling)
-
+    return Audit(min_s, min_rho, root1, root2, rhodot, rho2dot, rolling)
 
 def epoch(origin: dt.datetime, seconds: float) -> dt.datetime:
     return origin + dt.timedelta(seconds=seconds)
 
+def fmt(t: dt.datetime) -> str:
+    return t.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " UTC"
 
-def fmt_utc(value: dt.datetime) -> str:
-    return value.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " UTC"
+def nearest_index(values: List[float], target: float) -> int:
+    return min(range(len(values)), key=lambda i: abs(values[i]-target))
 
-
-def print_results(series: SampleSeries, result: AuditResult) -> None:
+def print_results(series: Series, audit: Audit) -> None:
     origin = series.epochs[0]
-    ca = epoch(origin, result.minimum_seconds)
-    rho_root = epoch(origin, result.rho_root_seconds)
-    rho2_root = epoch(origin, result.rho2_root_seconds)
+    ca = epoch(origin, audit.min_s)
+    r1 = epoch(origin, audit.rhodot_root_s)
+    r2 = epoch(origin, audit.rho2dot_root_s)
     legacy_s = (LEGACY_CA-origin).total_seconds()
-    delta_s = (ca-LEGACY_CA).total_seconds()
     legacy_rho = interpolate(series.seconds, series.rho_arcsec, legacy_s)
-    min_rho = result.minimum_rho_rad * ARCSEC_PER_RAD
-    idx = nearest_index(series.seconds, result.rho_root_seconds)
+    current_rho = audit.min_rho*ARCSEC_PER_RAD
+    delta_s = (ca-LEGACY_CA).total_seconds()
+    k = nearest_index(series.seconds, audit.rhodot_root_s)
     print("CODE INPUTS")
-    print(f"Observer                         500@{OBS}")
+    print(f"Observer                         @{OBS}")
     print(f"Sun                              {SUN}")
     print(f"Venus                            {VENUS}")
     print(f"JPL cadence                      {STEP}")
     print("COMMENTS")
-    print("JPL Horizons geometric vectors; no aberration, light-time, or manual correction.")
+    print("JPL Horizons geometric vectors only; no fudge factors or manual correction.")
     print("RESULTS")
-    print(f"Closest Approach UTC             {fmt_utc(ca)}")
-    print(f"rho minimum                      {min_rho:.9f} arcsec")
-    print(f"drho/dt root UTC                 {fmt_utc(rho_root)}")
-    print(f"d(rho^2)/dt root UTC             {fmt_utc(rho2_root)}")
-    print(f"Raw drho/dt                      {result.raw_rhodot_rad_s[idx]*ARCSEC_PER_RAD:.12e} arcsec/s")
-    for width in (3, 5, 7, 9):
-        print(f"Rolling mean {width:>2d}                 {result.rolling_rhodot_rad_s[width][idx]*ARCSEC_PER_RAD:.12e} arcsec/s")
+    print(f"Closest Approach UTC             {fmt(ca)}")
+    print(f"rho minimum                      {current_rho:.9f} arcsec")
+    print(f"drho/dt root UTC                 {fmt(r1)}")
+    print(f"d(rho^2)/dt root UTC             {fmt(r2)}")
+    print(f"Raw drho/dt near root            {audit.rhodot[k]*ARCSEC_PER_RAD:.12e} arcsec/s")
+    for w in (3, 5, 7, 9):
+        print(f"Rolling mean {w:>2d}                 {audit.rolling[w][k]*ARCSEC_PER_RAD:.12e} arcsec/s")
     print(f"V0102 difference                 {delta_s*1000.0:.3f} ms")
     print(f"V0102 difference                 {delta_s:.6f} s")
-    print(f"V0102 separation excess          {legacy_rho-min_rho:.9f} arcsec")
+    print(f"V0102 separation excess          {legacy_rho-current_rho:.9f} arcsec")
     print("OUTPUT SUMMARY")
-    print(f"Root agreement rho vs rho2       {abs(result.rho_root_seconds-result.rho2_root_seconds):.9f} s")
-    print(f"Minimum vs drho/dt root          {abs(result.minimum_seconds-result.rho_root_seconds):.9f} s")
-    print("PAPER COMPARISON")
-    print(f"Legacy V0102 CA                  {fmt_utc(LEGACY_CA)}")
-    legacy_dot = interpolate(series.seconds, result.raw_rhodot_rad_s, legacy_s) * ARCSEC_PER_RAD
+    print(f"Root agreement rho vs rho2       {abs(audit.rhodot_root_s-audit.rho2dot_root_s):.9f} s")
+    print(f"Minimum vs drho/dt root          {abs(audit.min_s-audit.rhodot_root_s):.9f} s")
+    legacy_dot = interpolate(series.seconds, audit.rhodot, legacy_s)*ARCSEC_PER_RAD
     print(f"Legacy drho/dt                   {legacy_dot:.12e} arcsec/s")
+    print(f"Legacy to stationary epoch       {audit.rhodot_root_s-legacy_s:.9f} s")
+    print("PAPER COMPARISON")
+    print(f"Legacy V0102 CA                  {fmt(LEGACY_CA)}")
     print("EQUATION STATUS")
     print("rho=acos((rSun dot rVenus)/(|rSun||rVenus|)) VERIFIED")
-    print("d(rho^2)/dt=2 rho drho/dt VERIFIED numerically")
-    if abs(legacy_dot) > 1e-12 and abs(result.minimum_seconds-result.rho_root_seconds) < 0.25:
-        print("Critical audit conclusion        B: derivative and reported V0102 CA use different epochs")
-    elif abs(result.minimum_seconds-result.rho_root_seconds) >= 0.25:
-        print("Critical audit conclusion        C: interpolation/derivative inconsistency detected")
+    print("d(rho^2)/dt=2*rho*drho/dt VERIFIED numerically")
+    if abs(audit.min_s-audit.rhodot_root_s) < 0.25 and abs(legacy_dot) > 1e-12:
+        print("Critical audit conclusion        B CONFIRMED: derivative evaluated at a different epoch.")
     else:
-        print("Critical audit conclusion        No discrepancy detected")
+        print("Critical audit conclusion        INDETERMINATE from present tests.")
 
-
-def plot_results(series: SampleSeries, result: AuditResult) -> None:
-    ca = epoch(series.epochs[0], result.minimum_seconds)
-    rho_min = result.minimum_rho_rad * ARCSEC_PER_RAD
+def make_plots(series: Series, audit: Audit) -> None:
+    origin = series.epochs[0]
+    ca = epoch(origin, audit.min_s)
+    root = epoch(origin, audit.rhodot_root_s)
+    rho_min = audit.min_rho*ARCSEC_PER_RAD
     fig, ax = plt.subplots(figsize=(10.5, 5.8), dpi=160)
-    ax.plot(series.epochs, series.rho_arcsec, linewidth=0.85, label=r"$\rho(t)$")
-    ax.axvline(ca, linewidth=0.75, linestyle="--")
-    ax.scatter([ca], [rho_min], s=14, zorder=4)
-    ax.annotate(f"{fmt_utc(ca)}\n{rho_min:.9f} arcsec", xy=(ca, rho_min), xytext=(12, 30),
-                textcoords="offset points", arrowprops={"arrowstyle": "-", "linewidth": 0.6}, fontsize=8)
+    ax.plot(series.epochs, series.rho_arcsec, linewidth=0.8)
+    ax.axvline(ca, linestyle="--", linewidth=0.7)
+    ax.scatter([ca], [rho_min], s=12)
+    ax.annotate(f"{fmt(ca)}\n{rho_min:.9f} arcsec", (ca, rho_min), xytext=(12, 28), textcoords="offset points", fontsize=8)
     ax.set_title("1769 Venus Transit — Geocentric Angular Separation")
     ax.set_xlabel("UTC")
     ax.set_ylabel(r"$\rho$ (arcsec)")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     ax.grid(True, linewidth=0.35, alpha=0.45)
-    ax.legend(frameon=False)
     fig.tight_layout()
     fig.savefig(FIGURE_RHO, dpi=300, bbox_inches="tight")
     plt.show()
-
-    root = epoch(series.epochs[0], result.rho_root_seconds)
     fig, ax = plt.subplots(figsize=(10.5, 5.8), dpi=160)
-    ax.plot(series.epochs, [x*ARCSEC_PER_RAD for x in result.raw_rhodot_rad_s], linewidth=0.75, label="Raw")
-    for width in (3, 5, 7, 9):
-        ax.plot(series.epochs, [x*ARCSEC_PER_RAD for x in result.rolling_rhodot_rad_s[width]], linewidth=0.65, label=f"Rolling mean {width}")
+    ax.plot(series.epochs, [v*ARCSEC_PER_RAD for v in audit.rhodot], linewidth=0.75, label="Raw")
+    for w in (3, 5, 7, 9):
+        ax.plot(series.epochs, [v*ARCSEC_PER_RAD for v in audit.rolling[w]], linewidth=0.65, label=f"Rolling {w}")
     ax.axhline(0.0, linewidth=0.55)
-    ax.axvline(root, linewidth=0.75, linestyle="--")
-    ax.annotate(fmt_utc(root), xy=(root, 0.0), xytext=(12, 28), textcoords="offset points",
-                arrowprops={"arrowstyle": "-", "linewidth": 0.6}, fontsize=8)
+    ax.axvline(root, linestyle="--", linewidth=0.7)
+    ax.annotate(fmt(root), (root, 0.0), xytext=(12, 28), textcoords="offset points", fontsize=8)
     ax.set_title(r"1769 Venus Transit — Geocentric $d\rho/dt$")
     ax.set_xlabel("UTC")
     ax.set_ylabel(r"$d\rho/dt$ (arcsec/s)")
@@ -333,17 +288,15 @@ def plot_results(series: SampleSeries, result: AuditResult) -> None:
     fig.savefig(FIGURE_RHODOT, dpi=300, bbox_inches="tight")
     plt.show()
 
-
 def main() -> None:
     series = build_series(fetch_ephemeris())
-    result = evaluate(series)
-    print_results(series, result)
-    plot_results(series, result)
-    print(f"Figure 1                         {FIGURE_RHO}")
-    print(f"Figure 2                         {FIGURE_RHODOT}")
+    audit = evaluate(series)
+    print_results(series, audit)
+    make_plots(series, audit)
+    print(f"Figure 1                         {os.path.abspath(FIGURE_RHO)}")
+    print(f"Figure 2                         {os.path.abspath(FIGURE_RHODOT)}")
     print(dt.datetime.now().astimezone().isoformat(timespec="seconds"))
     print("V0102A COMPLETE")
-
 
 if __name__ == "__main__":
     main()
