@@ -1,0 +1,10 @@
+quantity,value
+Cross-track velocity zero,3760.394 yr
+Signed-curvature zero,3778.942 yr
+Minimum total speed,45.605794 arcsec/century at 4095
+Maximum total speed,46.085236 arcsec/century at 3400
+Speed variation,1.040337 %
+Speed at year 3760,45.828028 arcsec/century
+Tangent direction at 3760,nan deg
+Signed curvature at 3760,-1.934128185853e-01 1/deg
+Verdict,DIRECTION SHIFT WITHOUT MAJOR SLOWDOWN
