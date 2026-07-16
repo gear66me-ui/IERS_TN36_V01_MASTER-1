@@ -1,0 +1,10 @@
+quantity,value
+JPL target,3 | Earth-Moon barycenter
+Cross-track velocity zero,3741.428 yr
+Signed-curvature zero,NOT FOUND
+Minimum total speed,45.606420 arcsec/century at 4095
+Maximum total speed,46.085084 arcsec/century at 3401
+Speed variation,1.038654 %
+Speed at year 3760,45.826635 arcsec/century
+Tangent direction at 3760,-0.112270488 deg
+Verdict,DIRECTION SHIFT WITHOUT MAJOR SLOWDOWN
